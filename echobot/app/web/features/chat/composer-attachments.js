@@ -12,9 +12,11 @@ export function createComposerAttachmentsController(deps) {
         uploadChatFile,
         uploadChatImage,
     } = deps;
+    let fileDragDepth = 0;
+    let fileDropUploadInFlight = false;
 
     function handleComposerFileButtonClick() {
-        if (!DOM.composerFileInput || chatState.chatBusy || chatState.activeChatJobId) {
+        if (!DOM.composerFileInput || isComposerLocked()) {
             return;
         }
 
@@ -69,7 +71,7 @@ export function createComposerAttachmentsController(deps) {
     }
 
     function handleComposerImageButtonClick() {
-        if (!DOM.composerImageInput || chatState.chatBusy || chatState.activeChatJobId) {
+        if (!DOM.composerImageInput || isComposerLocked()) {
             return;
         }
 
@@ -94,58 +96,26 @@ export function createComposerAttachmentsController(deps) {
             }
         } catch (error) {
             console.error("Failed to load composer images", error);
-            setRunStatus(error.message || "图片加载失败");
+            setRunStatus(error.message || "图片上传失败");
         }
     }
 
     async function handlePromptPaste(event) {
-        if (!DOM.promptInput || chatState.chatBusy || chatState.activeChatJobId) {
+        if (!DOM.promptInput || isComposerLocked()) {
             return;
         }
 
-        const pastedFiles = extractClipboardFiles(event.clipboardData);
+        const pastedFiles = extractTransferFiles(event.clipboardData);
         if (!pastedFiles.length) {
             return;
         }
 
         event.preventDefault();
 
-        const imageFiles = pastedFiles.filter((file) => isImageFile(file));
-        const otherFiles = pastedFiles.filter((file) => !isImageFile(file));
-        const uploadErrors = [];
-        let uploadedImageCount = 0;
-        let uploadedFileCount = 0;
-        let imageLimitReached = false;
-        let fileLimitReached = false;
-
-        if (imageFiles.length) {
-            try {
-                const result = await addComposerImages(imageFiles);
-                uploadedImageCount = result.addedCount;
-                imageLimitReached = result.truncated;
-            } catch (error) {
-                console.error("Failed to upload pasted images", error);
-                uploadErrors.push(error.message || "图片上传失败");
-            }
-        }
-
-        if (otherFiles.length) {
-            try {
-                const result = await addComposerFiles(otherFiles);
-                uploadedFileCount = result.addedCount;
-                fileLimitReached = result.truncated;
-            } catch (error) {
-                console.error("Failed to upload pasted files", error);
-                uploadErrors.push(error.message || "文件上传失败");
-            }
-        }
-
-        const statusText = buildPastedAttachmentStatus({
-            uploadedImageCount,
-            uploadedFileCount,
-            imageLimitReached,
-            fileLimitReached,
-            uploadErrors,
+        const statusText = await importComposerTransfers(pastedFiles, {
+            actionLabel: "已粘贴",
+            imageLogLabel: "Failed to upload pasted images",
+            fileLogLabel: "Failed to upload pasted files",
         });
         if (statusText) {
             setRunStatus(statusText);
@@ -177,9 +147,83 @@ export function createComposerAttachmentsController(deps) {
         }
     }
 
+    function handleWindowFileDragEnter(event) {
+        if (!isFileTransferEvent(event)) {
+            return;
+        }
+
+        event.preventDefault();
+        fileDragDepth += 1;
+        syncWindowFileDropOverlay();
+    }
+
+    function handleWindowFileDragOver(event) {
+        if (!isFileTransferEvent(event)) {
+            return;
+        }
+
+        event.preventDefault();
+        if (event.dataTransfer) {
+            event.dataTransfer.dropEffect = canAcceptFileDrop() ? "copy" : "none";
+        }
+        syncWindowFileDropOverlay();
+    }
+
+    function handleWindowFileDragLeave(event) {
+        if (!isFileTransferEvent(event)) {
+            return;
+        }
+
+        fileDragDepth = Math.max(fileDragDepth - 1, 0);
+        if (fileDragDepth === 0 || !isViewportPoint(event.clientX, event.clientY)) {
+            resetWindowFileDropState();
+            return;
+        }
+
+        syncWindowFileDropOverlay();
+    }
+
+    async function handleWindowFileDrop(event) {
+        if (!isFileTransferEvent(event)) {
+            return;
+        }
+
+        event.preventDefault();
+        const droppedFiles = extractTransferFiles(event.dataTransfer);
+        resetWindowFileDropState();
+        if (!droppedFiles.length) {
+            return;
+        }
+
+        if (fileDropUploadInFlight) {
+            setRunStatus("正在处理刚刚拖入的附件，请稍候");
+            return;
+        }
+        if (isComposerLocked()) {
+            setRunStatus("后台任务运行中，暂不支持拖拽上传");
+            return;
+        }
+
+        fileDropUploadInFlight = true;
+        try {
+            const statusText = await importComposerTransfers(droppedFiles, {
+                actionLabel: "已拖入",
+                imageLogLabel: "Failed to upload dropped images",
+                fileLogLabel: "Failed to upload dropped files",
+            });
+            if (statusText) {
+                setRunStatus(statusText);
+            }
+        } finally {
+            fileDropUploadInFlight = false;
+            syncWindowFileDropOverlay();
+        }
+    }
+
     function refreshComposerAttachments() {
         renderComposerFiles();
         renderComposerImages();
+        syncWindowFileDropOverlay();
     }
 
     function clearComposerAttachments() {
@@ -187,6 +231,7 @@ export function createComposerAttachmentsController(deps) {
         chatState.composerFiles = [];
         renderComposerFiles();
         renderComposerImages();
+        resetWindowFileDropState();
     }
 
     async function addComposerFiles(selectedFiles) {
@@ -259,6 +304,75 @@ export function createComposerAttachmentsController(deps) {
         };
     }
 
+    async function importComposerTransfers(
+        files,
+        {
+            actionLabel,
+            imageLogLabel,
+            fileLogLabel,
+        },
+    ) {
+        const imageFiles = files.filter((file) => isImageFile(file));
+        const otherFiles = files.filter((file) => !isImageFile(file));
+        const uploadErrors = [];
+        let uploadedImageCount = 0;
+        let uploadedFileCount = 0;
+        let imageLimitReached = false;
+        let fileLimitReached = false;
+
+        if (imageFiles.length) {
+            try {
+                const result = await addComposerImages(imageFiles);
+                uploadedImageCount = result.addedCount;
+                imageLimitReached = result.truncated;
+            } catch (error) {
+                console.error(imageLogLabel, error);
+                uploadErrors.push(error.message || "图片上传失败");
+            }
+        }
+
+        if (otherFiles.length) {
+            try {
+                const result = await addComposerFiles(otherFiles);
+                uploadedFileCount = result.addedCount;
+                fileLimitReached = result.truncated;
+            } catch (error) {
+                console.error(fileLogLabel, error);
+                uploadErrors.push(error.message || "文件上传失败");
+            }
+        }
+
+        return buildAttachmentTransferStatus({
+            actionLabel,
+            uploadedImageCount,
+            uploadedFileCount,
+            imageLimitReached,
+            fileLimitReached,
+            uploadErrors,
+        });
+    }
+
+    function isComposerLocked() {
+        return chatState.chatBusy || Boolean(chatState.activeChatJobId);
+    }
+
+    function canAcceptFileDrop() {
+        return !isComposerLocked() && !fileDropUploadInFlight;
+    }
+
+    function syncWindowFileDropOverlay() {
+        if (!DOM.windowFileDropOverlay) {
+            return;
+        }
+
+        DOM.windowFileDropOverlay.hidden = !(fileDragDepth > 0 && canAcceptFileDrop());
+    }
+
+    function resetWindowFileDropState() {
+        fileDragDepth = 0;
+        syncWindowFileDropOverlay();
+    }
+
     return {
         clearComposerAttachments,
         handleComposerFileButtonClick,
@@ -268,6 +382,10 @@ export function createComposerAttachmentsController(deps) {
         handleComposerImageInputChange,
         handleComposerImagesClick,
         handlePromptPaste,
+        handleWindowFileDragEnter,
+        handleWindowFileDragLeave,
+        handleWindowFileDragOver,
+        handleWindowFileDrop,
         refreshComposerAttachments,
     };
 }
@@ -291,6 +409,7 @@ async function readComposerImages(files, uploadImage, deleteAttachment) {
         await cleanupUploadedComposerEntries(nextImages, deleteAttachment);
         throw error;
     }
+
     return nextImages.filter(
         (image) => String(image.attachmentId || "").trim() && String(image.url || "").trim(),
     );
@@ -316,6 +435,7 @@ async function readComposerFiles(files, uploadFile, deleteAttachment) {
         await cleanupUploadedComposerEntries(nextFiles, deleteAttachment);
         throw error;
     }
+
     return nextFiles.filter(
         (file) => String(file.attachmentId || "").trim() && String(file.workspacePath || "").trim(),
     );
@@ -334,12 +454,12 @@ async function cleanupUploadedComposerEntries(entries, deleteAttachment) {
     );
 }
 
-function extractClipboardFiles(clipboardData) {
-    if (!clipboardData) {
+function extractTransferFiles(transfer) {
+    if (!transfer) {
         return [];
     }
 
-    const itemFiles = Array.from(clipboardData.items || [])
+    const itemFiles = Array.from(transfer.items || [])
         .filter((item) => item?.kind === "file")
         .map((item) => item.getAsFile())
         .filter((file) => Boolean(file));
@@ -347,7 +467,7 @@ function extractClipboardFiles(clipboardData) {
         return itemFiles;
     }
 
-    return Array.from(clipboardData.files || []).filter((file) => Boolean(file));
+    return Array.from(transfer.files || []).filter((file) => Boolean(file));
 }
 
 function isImageFile(file) {
@@ -360,7 +480,28 @@ function isImageFile(file) {
     return IMAGE_FILE_NAME_PATTERN.test(fileName);
 }
 
-function buildPastedAttachmentStatus({
+function isFileTransferEvent(event) {
+    const transfer = event?.dataTransfer;
+    if (!transfer) {
+        return false;
+    }
+
+    return Array.from(transfer.types || []).includes("Files");
+}
+
+function isViewportPoint(clientX, clientY) {
+    return (
+        Number.isFinite(clientX)
+        && Number.isFinite(clientY)
+        && clientX > 0
+        && clientY > 0
+        && clientX < window.innerWidth
+        && clientY < window.innerHeight
+    );
+}
+
+function buildAttachmentTransferStatus({
+    actionLabel,
     uploadedImageCount,
     uploadedFileCount,
     imageLimitReached,
@@ -377,7 +518,7 @@ function buildPastedAttachmentStatus({
         uploadedParts.push(`${uploadedFileCount} 个文件`);
     }
     if (uploadedParts.length) {
-        statusParts.push(`已粘贴 ${uploadedParts.join("、")}`);
+        statusParts.push(`${actionLabel} ${uploadedParts.join("、")}`);
     }
 
     if (imageLimitReached || fileLimitReached) {
@@ -449,6 +590,7 @@ function describeComposerFile(file) {
     if (sizeText) {
         return `待发送 · ${sizeText}`;
     }
+
     return "待发送";
 }
 
@@ -461,9 +603,10 @@ function formatComposerFileSize(sizeBytes) {
         return `${size} B`;
     }
     if (size < 1024 * 1024) {
-        return `${(size / 1024).toFixed(1).replace(/\\.0$/, "")} KB`;
+        return `${(size / 1024).toFixed(1).replace(/\.0$/, "")} KB`;
     }
-    return `${(size / (1024 * 1024)).toFixed(1).replace(/\\.0$/, "")} MB`;
+
+    return `${(size / (1024 * 1024)).toFixed(1).replace(/\.0$/, "")} MB`;
 }
 
 function renderComposerImages() {

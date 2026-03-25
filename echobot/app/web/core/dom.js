@@ -133,4 +133,5 @@ export const DOM = {
     ttsDetail: document.getElementById("tts-detail"),
     ttsProviderSelect: document.getElementById("tts-provider-select"),
     voiceSelect: document.getElementById("voice-select"),
+    windowFileDropOverlay: document.getElementById("window-file-drop-overlay"),
 };

@@ -27,6 +27,18 @@ export function wireAppEvents(features) {
     DOM.promptInput.addEventListener("paste", (event) => {
         void chat.handlePromptPaste(event);
     });
+    window.addEventListener("dragenter", (event) => {
+        void chat.handleWindowFileDragEnter(event);
+    });
+    window.addEventListener("dragover", (event) => {
+        void chat.handleWindowFileDragOver(event);
+    });
+    window.addEventListener("dragleave", (event) => {
+        void chat.handleWindowFileDragLeave(event);
+    });
+    window.addEventListener("drop", (event) => {
+        void chat.handleWindowFileDrop(event);
+    });
 
     bindOptionalClick(DOM.composerFileButton, chat.handleComposerFileButtonClick);
     bindOptionalInputChange(DOM.composerFileInput, chat.handleComposerFileInputChange);

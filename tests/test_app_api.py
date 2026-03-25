@@ -1917,6 +1917,7 @@ class AppApiTests(unittest.TestCase):
                 self.assertIn('id="stage-effects-particle-opacity-input"', page.text)
                 self.assertIn('id="stage-effects-particle-size-input"', page.text)
                 self.assertIn('id="stage-effects-particle-speed-input"', page.text)
+                self.assertIn('id="window-file-drop-overlay"', page.text)
                 self.assertIn('id="message-image-dialog"', page.text)
                 self.assertIn('id="message-image-dialog-image"', page.text)
                 self.assertNotIn('id="message-image-dialog-link"', page.text)
