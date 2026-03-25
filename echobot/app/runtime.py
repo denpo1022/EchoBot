@@ -121,7 +121,9 @@ class AppRuntime:
             self.tts_service,
             self.asr_service,
         )
-        await self.asr_service.on_startup()
+        asr_initialized = await self.web_console_service.initialize_runtime_settings()
+        if not asr_initialized:
+            await self.asr_service.on_startup()
 
         await self.channel_manager.start_all()
         self.gateway_task = asyncio.create_task(

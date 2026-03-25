@@ -46,6 +46,7 @@ export function wireAppEvents(features) {
     bindOptionalChange(DOM.live2dMouseFollowCheckbox, live2d.handleMouseFollowToggle);
     DOM.voiceSelect.addEventListener("change", tts.handleVoiceSelectionChange);
     bindOptionalAsyncChange(DOM.ttsProviderSelect, tts.handleTtsProviderChange);
+    bindOptionalAsyncChange(DOM.asrProviderSelect, asr.handleAsrProviderChange);
     bindOptionalAsyncChange(DOM.modelSelect, () => live2d.handleLive2DModelChange(DOM.modelSelect.value));
     bindOptionalClick(DOM.live2dUploadButton, () => DOM.live2dUploadInput?.click());
     bindOptionalInputChange(DOM.live2dUploadInput, live2d.handleLive2DDirectoryUpload);

@@ -5,6 +5,7 @@ pydantic
 loguru
 PyYAML
 Pillow
+openai
 
 # Memory
 agentscope

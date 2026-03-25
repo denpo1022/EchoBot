@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import asyncio
 
-from .base import SynthesizedSpeech, TTSProvider, VoiceOption
+from .base import (
+    SynthesizedSpeech,
+    TTSProvider,
+    TTSProviderStatus,
+    VoiceOption,
+)
+from .synthesis import build_tts_synthesis_options
 from .text import normalize_text_for_tts
 
 
@@ -32,17 +38,11 @@ class TTSService:
         provider = self._provider_for(provider_name)
         return provider.default_voice
 
-    def provider_status(self, provider_name: str) -> dict[str, str | bool]:
+    def provider_status(self, provider_name: str) -> TTSProviderStatus:
         provider = self._provider_for(provider_name)
-        available, detail = provider.availability()
-        return {
-            "name": provider.name,
-            "label": provider.label,
-            "available": available,
-            "detail": detail,
-        }
+        return provider.status()
 
-    def providers_status(self) -> list[dict[str, str | bool]]:
+    def providers_status(self) -> list[TTSProviderStatus]:
         return [
             self.provider_status(provider_name)
             for provider_name in self.provider_names()
@@ -66,18 +66,18 @@ class TTSService:
         pitch: str | None = None,
     ) -> SynthesizedSpeech:
         provider = self._provider_for(provider_name)
-        available, detail = provider.availability()
-        if not available:
-            raise RuntimeError(detail)
         normalized_text = normalize_text_for_tts(text)
         if not normalized_text:
             raise ValueError("TTS text must not be empty")
-        return await provider.synthesize(
-            text=normalized_text,
+        options = build_tts_synthesis_options(
             voice=voice,
             rate=rate,
             volume=volume,
             pitch=pitch,
+        )
+        return await provider.synthesize(
+            text=normalized_text,
+            options=options,
         )
 
     async def close(self) -> None:

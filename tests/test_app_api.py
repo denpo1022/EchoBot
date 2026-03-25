@@ -17,7 +17,7 @@ from PIL import Image
 
 from echobot import AgentCore, AgentTraceStore, LLMMessage, LLMResponse
 from echobot.attachments import AttachmentStore
-from echobot.asr import ASRStatusSnapshot, TranscriptionResult
+from echobot.asr import ASRStatusSnapshot, ProviderStatusSnapshot, TranscriptionResult
 from echobot.app import create_app
 from echobot.channels import ChannelAddress
 from echobot.orchestration import (
@@ -40,10 +40,17 @@ from echobot.scheduling.cron import (
     CronStore,
 )
 from echobot.scheduling.heartbeat import HeartbeatService
-from echobot.tts import SynthesizedSpeech, TTSProvider, TTSService, VoiceOption
+from echobot.tts import (
+    SynthesizedSpeech,
+    TTSProvider,
+    TTSSynthesisOptions,
+    TTSService,
+    VoiceOption,
+)
 
 
-os.environ.setdefault("ECHOBOT_ASR_AUTO_DOWNLOAD", "false")
+os.environ.setdefault("ECHOBOT_ASR_SHERPA_AUTO_DOWNLOAD", "false")
+os.environ.setdefault("ECHOBOT_VAD_SILERO_AUTO_DOWNLOAD", "false")
 
 
 def make_chat_png_bytes() -> bytes:
@@ -180,19 +187,16 @@ class FakeTTSProvider(TTSProvider):
         self,
         *,
         text: str,
-        voice: str | None = None,
-        rate: str | None = None,
-        volume: str | None = None,
-        pitch: str | None = None,
+        options: TTSSynthesisOptions | None = None,
     ) -> SynthesizedSpeech:
-        del rate, volume, pitch
-        payload = f"fake-audio:{voice or self.default_voice}:{text}".encode("utf-8")
+        selected_voice = (options.voice if options else None) or self.default_voice
+        payload = f"fake-audio:{selected_voice}:{text}".encode("utf-8")
         return SynthesizedSpeech(
             audio_bytes=payload,
             content_type="audio/mpeg",
             file_extension="mp3",
             provider=self.name,
-            voice=voice or self.default_voice,
+            voice=selected_voice,
         )
 
 
@@ -226,24 +230,21 @@ class FakeKokoroTTSProvider(TTSProvider):
         self,
         *,
         text: str,
-        voice: str | None = None,
-        rate: str | None = None,
-        volume: str | None = None,
-        pitch: str | None = None,
+        options: TTSSynthesisOptions | None = None,
     ) -> SynthesizedSpeech:
-        del rate, volume, pitch
-        payload = f"fake-kokoro:{voice or self.default_voice}:{text}".encode("utf-8")
+        selected_voice = (options.voice if options else None) or self.default_voice
+        payload = f"fake-kokoro:{selected_voice}:{text}".encode("utf-8")
         return SynthesizedSpeech(
             audio_bytes=payload,
             content_type="audio/wav",
             file_extension="wav",
             provider=self.name,
-            voice=voice or self.default_voice,
+            voice=selected_voice,
         )
 
 
 class FakeRealtimeASRSession:
-    def accept_audio_bytes(self, audio_bytes: bytes) -> list[dict[str, object]]:
+    async def accept_audio_bytes(self, audio_bytes: bytes) -> list[dict[str, object]]:
         if not audio_bytes:
             return []
         text = audio_bytes.decode("utf-8", errors="ignore").strip() or "voice"
@@ -257,14 +258,17 @@ class FakeRealtimeASRSession:
             }
         ]
 
-    def flush(self) -> list[dict[str, object]]:
+    async def flush(self) -> list[dict[str, object]]:
         return []
 
-    def reset(self) -> None:
+    async def reset(self) -> None:
         return None
 
 
 class FakeASRService:
+    def __init__(self) -> None:
+        self.selected_asr_provider = "fake-asr"
+
     async def on_startup(self) -> None:
         return None
 
@@ -276,11 +280,44 @@ class FakeASRService:
             available=True,
             state="ready",
             detail="ASR ready",
-            auto_download=True,
-            model_directory="D:/fake-models",
             sample_rate=16000,
-            provider="cpu",
+            selected_asr_provider=self.selected_asr_provider,
+            selected_vad_provider="fake-vad",
             always_listen_supported=True,
+            asr_providers=[
+                ProviderStatusSnapshot(
+                    kind="asr",
+                    name="fake-asr",
+                    label="Fake ASR",
+                    selected=self.selected_asr_provider == "fake-asr",
+                    available=True,
+                    state="ready",
+                    detail="ASR ready",
+                    resource_directory="D:/fake-models/asr",
+                ),
+                ProviderStatusSnapshot(
+                    kind="asr",
+                    name="backup-asr",
+                    label="Backup ASR",
+                    selected=self.selected_asr_provider == "backup-asr",
+                    available=True,
+                    state="ready",
+                    detail="Backup ASR ready",
+                    resource_directory="D:/fake-models/asr-backup",
+                ),
+            ],
+            vad_providers=[
+                ProviderStatusSnapshot(
+                    kind="vad",
+                    name="fake-vad",
+                    label="Fake VAD",
+                    selected=True,
+                    available=True,
+                    state="ready",
+                    detail="VAD ready",
+                    resource_directory="D:/fake-models/vad",
+                )
+            ],
         )
 
     async def transcribe_wav_bytes(self, audio_bytes: bytes) -> TranscriptionResult:
@@ -289,6 +326,12 @@ class FakeASRService:
 
     async def create_realtime_session(self) -> FakeRealtimeASRSession:
         return FakeRealtimeASRSession()
+
+    async def set_selected_asr_provider(self, provider_name: str) -> None:
+        normalized_name = provider_name.strip()
+        if normalized_name not in {"fake-asr", "backup-asr"}:
+            raise ValueError(f"Unknown ASR provider: {provider_name}")
+        self.selected_asr_provider = normalized_name
 
 
 def build_test_context(options: RuntimeOptions) -> RuntimeContext:
@@ -1852,6 +1895,7 @@ class AppApiTests(unittest.TestCase):
                 self.assertIn('id="stop-agent-button"', page.text)
                 self.assertIn('id="role-editor"', page.text)
                 self.assertIn('id="tts-provider-select"', page.text)
+                self.assertIn('id="asr-provider-select"', page.text)
                 self.assertIn('id="route-mode-select"', page.text)
                 self.assertIn('id="delegated-ack-checkbox"', page.text)
                 self.assertIn('id="heartbeat-panel"', page.text)
@@ -1900,6 +1944,10 @@ class AppApiTests(unittest.TestCase):
                 self.assertTrue(payload["asr"]["available"])
                 self.assertEqual("ready", payload["asr"]["state"])
                 self.assertEqual(16000, payload["asr"]["sample_rate"])
+                self.assertEqual("fake-asr", payload["asr"]["selected_asr_provider"])
+                self.assertTrue(
+                    any(item["name"] == "backup-asr" for item in payload["asr"]["asr_providers"])
+                )
                 self.assertEqual("edge", payload["tts"]["default_provider"])
                 self.assertEqual("zh-CN-XiaoxiaoNeural", payload["tts"]["default_voices"]["edge"])
                 self.assertEqual("zf_001", payload["tts"]["default_voices"]["kokoro"])
@@ -2009,6 +2057,81 @@ class AppApiTests(unittest.TestCase):
 
             self.assertEqual(200, restarted_config.status_code)
             self.assertFalse(restarted_config.json()["runtime"]["delegated_ack_enabled"])
+
+    def test_web_console_asr_provider_switch_updates_config_and_persists(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            settings_path = workspace / ".echobot" / "runtime_settings.json"
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "delegated_ack_enabled": True,
+                        "future_setting": "keep-me",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            app = create_app(
+                runtime_options=RuntimeOptions(
+                    workspace=workspace,
+                    no_tools=True,
+                    no_skills=True,
+                    no_memory=True,
+                    no_heartbeat=True,
+                ),
+                channel_config_path=workspace / ".echobot" / "channels.json",
+                context_builder=build_test_context,
+                tts_service_builder=build_test_tts_service,
+                asr_service_builder=build_test_asr_service,
+            )
+
+            with TestClient(app) as client:
+                updated = client.patch(
+                    "/api/web/asr/provider",
+                    json={
+                        "provider": "backup-asr",
+                    },
+                )
+                config = client.get("/api/web/config")
+
+            self.assertEqual(200, updated.status_code)
+            self.assertEqual("backup-asr", updated.json()["selected_asr_provider"])
+            self.assertEqual(200, config.status_code)
+            self.assertEqual("backup-asr", config.json()["asr"]["selected_asr_provider"])
+
+            self.assertTrue(settings_path.exists())
+            settings_payload = json.loads(settings_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                {
+                    "delegated_ack_enabled": True,
+                    "selected_asr_provider": "backup-asr",
+                    "future_setting": "keep-me",
+                },
+                settings_payload,
+            )
+
+            restarted_app = create_app(
+                runtime_options=RuntimeOptions(
+                    workspace=workspace,
+                    no_tools=True,
+                    no_skills=True,
+                    no_memory=True,
+                    no_heartbeat=True,
+                ),
+                channel_config_path=workspace / ".echobot" / "channels.json",
+                context_builder=build_test_context,
+                tts_service_builder=build_test_tts_service,
+                asr_service_builder=build_test_asr_service,
+            )
+
+            with TestClient(restarted_app) as client:
+                restarted_config = client.get("/api/web/config")
+
+            self.assertEqual(200, restarted_config.status_code)
+            self.assertEqual("backup-asr", restarted_config.json()["asr"]["selected_asr_provider"])
 
     def test_web_console_stage_background_upload_and_asset_routes_work(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2416,6 +2539,8 @@ class AppApiTests(unittest.TestCase):
                     ready_event = websocket.receive_json()
                     websocket.send_bytes(b"hello from websocket")
                     transcript_event = websocket.receive_json()
+                    websocket.send_text("flush")
+                    flush_event = websocket.receive_json()
 
             self.assertEqual(200, status.status_code)
             self.assertTrue(status.json()["available"])
@@ -2429,3 +2554,4 @@ class AppApiTests(unittest.TestCase):
             self.assertEqual(16000, ready_event["sample_rate"])
             self.assertEqual("transcript", transcript_event["type"])
             self.assertEqual("hello from websocket", transcript_event["text"])
+            self.assertEqual("flush_complete", flush_event["type"])

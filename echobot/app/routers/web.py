@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
@@ -10,6 +11,7 @@ from ..schemas import (
     TTSRequest,
     TTSVoiceModel,
     TTSVoicesResponse,
+    UpdateWebASRProviderRequest,
     UpdateWebRuntimeConfigRequest,
     WebASRConfigModel,
     WebConfigResponse,
@@ -202,16 +204,24 @@ async def synthesize_tts(
 @router.get("/web/asr/status", response_model=WebASRConfigModel)
 async def get_asr_status(runtime=Depends(get_app_runtime)) -> WebASRConfigModel:
     snapshot = await runtime.web_console_service.asr_service.status_snapshot()
-    return WebASRConfigModel(
-        available=snapshot.available,
-        state=snapshot.state,
-        detail=snapshot.detail,
-        auto_download=snapshot.auto_download,
-        model_directory=snapshot.model_directory,
-        sample_rate=snapshot.sample_rate,
-        provider=snapshot.provider,
-        always_listen_supported=snapshot.always_listen_supported,
-    )
+    return WebASRConfigModel(**asdict(snapshot))
+
+
+@router.patch("/web/asr/provider", response_model=WebASRConfigModel)
+async def update_asr_provider(
+    request: UpdateWebASRProviderRequest,
+    runtime=Depends(get_app_runtime),
+) -> WebASRConfigModel:
+    try:
+        payload = await runtime.web_console_service.set_selected_asr_provider(
+            request.provider,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return WebASRConfigModel(**payload)
 
 
 @router.post("/web/asr", response_model=ASRTranscriptionResponse)
@@ -269,26 +279,27 @@ async def asr_websocket(websocket: WebSocket) -> None:
 
             payload_bytes = message.get("bytes")
             if payload_bytes is not None:
-                events = await asyncio.to_thread(session.accept_audio_bytes, payload_bytes)
+                events = await session.accept_audio_bytes(payload_bytes)
                 for event in events:
                     await websocket.send_json(event)
                 continue
 
             payload_text = message.get("text")
             if payload_text == "flush":
-                events = await asyncio.to_thread(session.flush)
+                events = await session.flush()
                 for event in events:
                     await websocket.send_json(event)
+                await websocket.send_json({"type": "flush_complete"})
                 continue
             if payload_text == "reset":
-                await asyncio.to_thread(session.reset)
+                await session.reset()
                 await websocket.send_json({"type": "reset"})
                 continue
     except WebSocketDisconnect:
         pass
     finally:
         try:
-            events = await asyncio.to_thread(session.flush)
+            events = await session.flush()
         except Exception:
             return
         for event in events:

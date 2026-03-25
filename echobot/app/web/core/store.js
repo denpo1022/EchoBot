@@ -75,6 +75,7 @@ export const audioState = {
 
 export const asrState = {
     asrConfig: null,
+    asrProviderUpdating: false,
     microphoneStream: null,
     microphoneSourceNode: null,
     microphoneProcessorNode: null,

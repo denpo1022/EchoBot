@@ -1,17 +1,20 @@
 from __future__ import annotations
 
-import json
-import os
 import shutil
 import tarfile
 import tempfile
-import time
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
-from urllib.request import urlopen
 
+from ....speech_assets import (
+    acquire_download_lock,
+    download_file,
+    file_name_from_url,
+    replace_directory,
+    write_download_metadata,
+)
 
 DEFAULT_KOKORO_URL = (
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/"
@@ -33,6 +36,10 @@ class KokoroModelPaths:
 class KokoroDownloadSettings:
     model_url: str
     timeout_seconds: float
+
+
+class KokoroPreparationCancelled(RuntimeError):
+    pass
 
 
 class KokoroModelManager:
@@ -85,29 +92,47 @@ class KokoroModelManager:
             missing_paths.append(self._paths.data_dir)
         return missing_paths
 
-    def prepare_required_files(self) -> KokoroModelPaths:
+    def prepare_required_files(
+        self,
+        *,
+        stop_event: threading.Event | None = None,
+    ) -> KokoroModelPaths:
+        self._ensure_not_cancelled(stop_event)
         if self.models_ready():
             return self._paths
 
         self._paths.root_dir.parent.mkdir(parents=True, exist_ok=True)
-        with self._acquire_download_lock():
+        with self._acquire_download_lock(stop_event):
+            self._ensure_not_cancelled(stop_event)
             if self.models_ready():
                 return self._paths
-            self._install_model()
+            self._install_model(stop_event)
         return self._paths
 
-    def _install_model(self) -> None:
+    def _install_model(
+        self,
+        stop_event: threading.Event | None,
+    ) -> None:
         with tempfile.TemporaryDirectory(prefix="echobot_kokoro_") as temp_dir:
             temp_root = Path(temp_dir)
-            archive_name = self._file_name_from_url(self._settings.model_url)
+            archive_name = file_name_from_url(self._settings.model_url)
             archive_path = temp_root / archive_name
             extract_dir = temp_root / "extract"
             extract_dir.mkdir(parents=True, exist_ok=True)
 
-            self._download_file(self._settings.model_url, archive_path)
+            download_file(
+                self._settings.model_url,
+                archive_path,
+                timeout_seconds=self._settings.timeout_seconds,
+                stop_event=stop_event,
+                cancelled_error_factory=self._cancelled_error,
+                progress_label="Kokoro TTS model",
+            )
+            self._ensure_not_cancelled(stop_event)
             with tarfile.open(archive_path, "r:*") as archive:
                 archive.extractall(extract_dir)
 
+            self._ensure_not_cancelled(stop_event)
             source_dir = self._find_directory_with_model_files(extract_dir)
             source_model = self._find_model_file(source_dir)
             source_data_dir = self._find_optional_directory(source_dir, "espeak-ng-data")
@@ -119,6 +144,7 @@ class KokoroModelManager:
                 shutil.rmtree(temp_install_dir)
             temp_install_dir.mkdir(parents=True, exist_ok=True)
 
+            self._ensure_not_cancelled(stop_event)
             shutil.copy2(source_model, temp_install_dir / "model.onnx")
             shutil.copy2(source_dir / "voices.bin", temp_install_dir / "voices.bin")
             shutil.copy2(source_dir / "tokens.txt", temp_install_dir / "tokens.txt")
@@ -130,18 +156,13 @@ class KokoroModelManager:
             for source_lexicon in source_lexicons:
                 shutil.copy2(source_lexicon, temp_install_dir / source_lexicon.name)
 
-            self._write_metadata(
+            write_download_metadata(
                 temp_install_dir / "metadata.json",
                 name="kokoro-multi-lang-v1_1",
                 source_url=self._settings.model_url,
             )
-            self._replace_directory(temp_install_dir, self._paths.root_dir)
-
-    def _download_file(self, url: str, destination: Path) -> None:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        with urlopen(url, timeout=self._settings.timeout_seconds) as response:
-            with destination.open("wb") as handle:
-                shutil.copyfileobj(response, handle)
+            self._ensure_not_cancelled(stop_event)
+            replace_directory(temp_install_dir, self._paths.root_dir)
 
     @staticmethod
     def _find_directory_with_model_files(root: Path) -> Path:
@@ -186,75 +207,29 @@ class KokoroModelManager:
                 return path
         return None
 
-    @staticmethod
-    def _replace_directory(source_dir: Path, target_dir: Path) -> None:
-        backup_dir = target_dir.with_name(f"{target_dir.name}.backup")
-        if backup_dir.exists():
-            shutil.rmtree(backup_dir)
-        if target_dir.exists():
-            target_dir.replace(backup_dir)
-        source_dir.replace(target_dir)
-        if backup_dir.exists():
-            shutil.rmtree(backup_dir)
-
-    @staticmethod
-    def _write_metadata(path: Path, *, name: str, source_url: str) -> None:
-        payload = {
-            "name": name,
-            "source_url": source_url,
-            "downloaded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        }
-        path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-
-    @staticmethod
-    def _file_name_from_url(url: str) -> str:
-        parsed = urlparse(url)
-        file_name = Path(parsed.path).name
-        if not file_name:
-            raise ValueError(f"Unable to determine file name from URL: {url}")
-        return file_name
-
     @contextmanager
-    def _acquire_download_lock(self):
+    def _acquire_download_lock(
+        self,
+        stop_event: threading.Event | None,
+    ):
         lock_path = self._paths.root_dir.parent / ".kokoro.download.lock"
-        deadline = time.monotonic() + self._settings.timeout_seconds
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-
-        while True:
-            try:
-                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            except FileExistsError:
-                if self._remove_stale_lock(lock_path):
-                    continue
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("Timed out while waiting for Kokoro model download lock")
-                time.sleep(0.25)
-                continue
-
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(json.dumps({"pid": os.getpid()}, ensure_ascii=False))
-            break
-
-        try:
+        with acquire_download_lock(
+            lock_path,
+            timeout_seconds=self._settings.timeout_seconds,
+            timeout_message="Timed out while waiting for Kokoro model download lock",
+            stop_event=stop_event,
+            cancelled_error_factory=self._cancelled_error,
+        ):
             yield
-        finally:
-            lock_path.unlink(missing_ok=True)
 
     @staticmethod
-    def _remove_stale_lock(lock_path: Path) -> bool:
-        try:
-            modified_at = lock_path.stat().st_mtime
-        except FileNotFoundError:
-            return False
+    def _cancelled_error() -> Exception:
+        return KokoroPreparationCancelled("Kokoro model preparation was cancelled")
 
-        if time.time() - modified_at < 3600:
-            return False
-
-        try:
-            lock_path.unlink()
-        except FileNotFoundError:
-            return False
-        return True
+    @classmethod
+    def _ensure_not_cancelled(
+        cls,
+        stop_event: threading.Event | None,
+    ) -> None:
+        if stop_event is not None and stop_event.is_set():
+            raise cls._cancelled_error()

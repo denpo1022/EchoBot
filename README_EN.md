@@ -140,17 +140,26 @@ Upload your favorite background images via the web control panel:
   <img src="./assets/webui_background.png" width="50%">
 </p>
 
-### 🖼️ Image Upload
+### 🖼️ Image Upload & Download
 
-For vision-capable models (e.g., `qwen3.5-plus` and `kimi-k2.5`), you can send images directly to your companion.
+For vision-capable models (e.g., `qwen3.5-plus` and `kimi-k2.5`), you can send images directly to your companion, and your companion can send images back to you as well.
 
 > 💡 **Tip**: If your model does not support image input, set `ECHOBOT_LLM_SUPPORTS_IMAGE_INPUT=false` in the project's `.env` file to reduce accidental image-related actions by the assistant.
 
 <p align="center">
-  <img src="./assets/webui_image.png" width="100%">
+  <img src="./assets/webui_image_1.png" width="77%">
+  <img src="./assets/webui_image_2.png" width="22%">
 </p>
 
 > The Live2D model shown in the demo is from: [【Ultra-Detailed Live2D Bulk Model】This bunny is so cute, I just have to eat you up!](https://www.bilibili.com/video/BV1YG6zYzEnN)
+
+### 📁 File Upload & Download
+
+Beyond images, your companion can also help you handle various types of files:
+
+<p align="center">
+  <img src="./assets/webui_file.png" width="100%">
+</p>
 
 ### ⏰ Scheduled & Periodic Tasks
 
@@ -201,6 +210,36 @@ Two free backends are supported:
 Powered by the [SenseVoice](https://k2-fsa.github.io/sherpa/onnx/sense-voice/index.html) model via sherpa-onnx — fully local and offline; model weights are downloaded automatically on first launch.
 
 EchoBot's web UI supports half-duplex voice interaction (microphone is muted during playback to prevent echo). Both "Push to Talk" and "Always-On Mic" modes are supported.
+
+### 🔌 Advanced: Custom Voice Models
+
+EchoBot supports TTS and ASR interfaces that follow the **OpenAI-compatible API**, so you can replace the built-in voice models with your own local or cloud services:
+
+<p align="center">
+<img src="./assets/webui_custom_1.png" width="50%" alt="Custom Voice Model Settings">
+</p>
+
+**🗣️ Custom TTS:**
+
+Supports services compatible with the `OpenAI Speech API`.
+
+For example, you can use [vLLM Omni Speech](https://docs.vllm.ai/projects/vllm-omni/en/latest/serving/speech_api/) to deploy speech synthesis models such as `Qwen3-TTS` or `Fish Speech S2 Pro` locally. After starting the vLLM service, configure the endpoint URL and model name in `.env`:
+
+```text
+ECHOBOT_TTS_OPENAI_MODEL=Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
+ECHOBOT_TTS_OPENAI_BASE_URL=http://localhost:8091/v1
+```
+
+**🎙️ Custom ASR:**
+
+Supports services compatible with the `OpenAI Transcriptions API`.
+
+For example, follow the [vLLM documentation](https://docs.vllm.com.cn/projects/recipes/en/latest/Qwen/Qwen3-ASR.html) to deploy `Qwen3-ASR`. After starting the vLLM service, configure the endpoint URL and model name in `.env`:
+
+```text
+ECHOBOT_ASR_OPENAI_MODEL=Qwen/Qwen3-ASR-0.6B
+ECHOBOT_ASR_OPENAI_BASE_URL=http://localhost:8080/v1
+```
 
 ### 💡 Lighting & Effects
 

@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, field
 
 
 @dataclass(slots=True, frozen=True)
-class ASRModelPaths:
-    root_dir: Path
-    sense_voice_dir: Path
-    sense_voice_model: Path
-    sense_voice_tokens: Path
-    vad_dir: Path
-    vad_model: Path
+class ProviderStatusSnapshot:
+    kind: str
+    name: str
+    label: str
+    selected: bool
+    available: bool
+    state: str
+    detail: str = ""
+    resource_directory: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -19,11 +20,12 @@ class ASRStatusSnapshot:
     available: bool
     state: str
     detail: str
-    auto_download: bool
-    model_directory: str
     sample_rate: int
-    provider: str
-    always_listen_supported: bool = True
+    selected_asr_provider: str
+    selected_vad_provider: str
+    always_listen_supported: bool
+    asr_providers: list[ProviderStatusSnapshot] = field(default_factory=list)
+    vad_providers: list[ProviderStatusSnapshot] = field(default_factory=list)
 
 
 @dataclass(slots=True, frozen=True)

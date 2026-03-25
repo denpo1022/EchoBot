@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from ...base import SynthesizedSpeech, TTSProvider, VoiceOption
-from .model_manager import DEFAULT_KOKORO_URL, KokoroModelManager
+from ...base import (
+    SynthesizedSpeech,
+    TTSProvider,
+    TTSProviderStatus,
+    TTSSynthesisOptions,
+    VoiceOption,
+)
+from .model_manager import (
+    DEFAULT_KOKORO_URL,
+    KokoroModelManager,
+    KokoroPreparationCancelled,
+)
 from .runtime import KokoroRuntime, kokoro_dependency_error_message
 from .voices import (
     KOKORO_SPEAKER_NAMES,
@@ -50,45 +61,45 @@ class KokoroTTSProvider(TTSProvider):
         )
         self._status_lock = asyncio.Lock()
         self._prepare_task: asyncio.Task[None] | None = None
+        self._prepare_stop_event: threading.Event | None = None
         self._runtime = KokoroRuntime(
             provider=provider,
             num_threads=max(1, num_threads),
             length_scale=self._length_scale,
             lang=lang,
         )
-        self._state = _StatusState(state="missing", detail="")
         self._dependency_error = kokoro_dependency_error_message()
-        self._refresh_state_from_disk()
+        self._last_prepare_error = ""
 
     @property
     def default_voice(self) -> str:
         return self._default_voice
 
-    def availability(self) -> tuple[bool, str]:
-        self._refresh_state_from_disk()
-        return self._state.state == "ready", self._state.detail
+    def status(self) -> TTSProviderStatus:
+        state = self._status_state()
+        return TTSProviderStatus(
+            name=self.name,
+            label=self.label,
+            available=state.state == "ready",
+            state=state.state,
+            detail=state.detail,
+        )
 
     async def list_voices(self) -> list[VoiceOption]:
-        if self._dependency_error is not None:
-            raise RuntimeError(self._dependency_error)
-        await self._maybe_start_prepare()
         return kokoro_voice_options()
 
     async def synthesize(
         self,
         *,
         text: str,
-        voice: str | None = None,
-        rate: str | None = None,
-        volume: str | None = None,
-        pitch: str | None = None,
+        options: TTSSynthesisOptions | None = None,
     ) -> SynthesizedSpeech:
-        del volume, pitch
-        await self._require_runtime_ready()
+        synthesis_options = options or TTSSynthesisOptions()
+        await self._ensure_ready_for_synthesis()
 
-        selected_voice = (voice or self._default_voice).strip()
+        selected_voice = (synthesis_options.voice or self._default_voice).strip()
         speaker_id = speaker_id_for_voice(selected_voice)
-        speed = _speed_from_rate(rate)
+        speed = synthesis_options.speed or 1.0
         audio_bytes = await asyncio.to_thread(
             self._synthesize_sync,
             text,
@@ -104,80 +115,104 @@ class KokoroTTSProvider(TTSProvider):
         )
 
     async def close(self) -> None:
+        if self._prepare_stop_event is not None:
+            self._prepare_stop_event.set()
         task = self._prepare_task
         if task is None or task.done():
             return
-        task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
-    async def _require_runtime_ready(self) -> None:
-        await self._maybe_start_prepare()
-        self._refresh_state_from_disk()
-        if self._state.state != "ready":
-            raise RuntimeError(self._state.detail)
+    async def _ensure_ready_for_synthesis(self) -> None:
+        await self._ensure_models_ready()
         await asyncio.to_thread(self._ensure_runtime_loaded)
 
-    async def _maybe_start_prepare(self) -> None:
-        async with self._status_lock:
-            self._refresh_state_from_disk()
-            if self._dependency_error is not None:
-                return
-            if self._state.state == "ready":
-                return
-            if not self._auto_download:
-                return
-            if self._prepare_task is not None and not self._prepare_task.done():
-                return
+    async def _ensure_models_ready(self) -> None:
+        state = self._status_state()
+        if state.state == "ready":
+            return
+        if state.state == "unavailable":
+            raise RuntimeError(state.detail)
+        if not self._auto_download:
+            raise RuntimeError(state.detail)
 
-            self._prepare_task = asyncio.create_task(
-                self._prepare_model(),
-                name="echobot_kokoro_tts_model_prepare",
+        await self._prepare_models()
+        state = self._status_state()
+        if state.state != "ready":
+            raise RuntimeError(state.detail)
+
+    async def _prepare_models(self) -> None:
+        async with self._status_lock:
+            state = self._status_state()
+            if state.state == "ready":
+                return
+            if state.state == "unavailable":
+                raise RuntimeError(state.detail)
+            if not self._auto_download:
+                raise RuntimeError(state.detail)
+
+            if self._prepare_task is None or self._prepare_task.done():
+                self._last_prepare_error = ""
+                self._prepare_stop_event = threading.Event()
+                self._prepare_task = asyncio.create_task(
+                    self._prepare_model(self._prepare_stop_event),
+                    name="echobot_kokoro_tts_model_prepare",
+                )
+
+            task = self._prepare_task
+
+        await task
+
+    async def _prepare_model(self, stop_event: threading.Event) -> None:
+        try:
+            await asyncio.to_thread(
+                self._model_manager.prepare_required_files,
+                stop_event=stop_event,
+            )
+        except KokoroPreparationCancelled:
+            return
+        except Exception as exc:
+            self._last_prepare_error = f"Kokoro 语音模型准备失败: {exc}"
+            return
+
+        self._last_prepare_error = ""
+        self._reset_runtime_objects()
+
+    def _status_state(self) -> _StatusState:
+        if self._dependency_error is not None:
+            return _StatusState(state="unavailable", detail=self._dependency_error)
+
+        if self._prepare_task is not None and not self._prepare_task.done():
+            return _StatusState(
+                state="downloading",
+                detail="正在准备 Kokoro 语音模型，请稍候。",
             )
 
-    async def _prepare_model(self) -> None:
-        self._set_state("downloading", "姝ｅ湪鑷姩涓嬭浇 Kokoro 璇煶妯″瀷锛岃绋嶅€?")
-        try:
-            await asyncio.to_thread(self._model_manager.prepare_required_files)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self._set_state("error", f"Kokoro 璇煶妯″瀷涓嬭浇澶辫触: {exc}")
-            return
-
-        self._reset_runtime_objects()
-        self._refresh_state_from_disk()
-
-    def _refresh_state_from_disk(self) -> None:
-        if self._dependency_error is not None:
-            self._set_state("unavailable", self._dependency_error)
-            return
+        if self._last_prepare_error:
+            return _StatusState(
+                state="error",
+                detail=self._last_prepare_error,
+            )
 
         missing_files = self._model_manager.missing_files()
         if not missing_files:
-            self._set_state("ready", "Kokoro 璇煶妯″瀷宸插氨缁?")
-            return
-
-        if self._prepare_task is not None and not self._prepare_task.done():
-            self._set_state("downloading", "姝ｅ湪鑷姩涓嬭浇 Kokoro 璇煶妯″瀷锛岃绋嶅€?")
-            return
+            return _StatusState(
+                state="ready",
+                detail="Kokoro TTS 已就绪。",
+            )
 
         relative_paths = ", ".join(
             _relative_to_root(path, self._model_manager.paths.root_dir)
             for path in missing_files
         )
         if self._auto_download:
-            self._set_state(
+            return _StatusState(
                 "missing",
-                f"Kokoro 璇煶妯″瀷灏氭湭鍑嗗濂斤紝棣栨浣跨敤鏃朵細鑷姩涓嬭浇: {relative_paths}",
+                f"Kokoro 语音模型尚未准备，首次合成时会自动下载: {relative_paths}",
             )
-        else:
-            self._set_state(
-                "missing",
-                f"缂哄皯 Kokoro 璇煶妯″瀷鏂囦欢: {relative_paths}",
-            )
-
-    def _set_state(self, state: str, detail: str) -> None:
-        self._state = _StatusState(state=state, detail=detail)
+        return _StatusState(
+            "missing",
+            f"缺少 Kokoro 语音模型文件: {relative_paths}",
+        )
 
     def _reset_runtime_objects(self) -> None:
         self._runtime.reset()
@@ -189,7 +224,7 @@ class KokoroTTSProvider(TTSProvider):
                 self._model_manager.lexicon_files(),
             )
         except Exception as exc:
-            self._set_state("error", f"Kokoro TTS 初始化失败: {exc}")
+            self._last_prepare_error = f"Kokoro TTS 初始化失败: {exc}"
             raise
 
     def _synthesize_sync(self, text: str, speaker_id: int, speed: float) -> bytes:
@@ -206,24 +241,3 @@ def _relative_to_root(path: Path, root_dir: Path) -> str:
         return path.relative_to(root_dir).as_posix()
     except ValueError:
         return path.name
-
-
-def _speed_from_rate(rate: str | None) -> float:
-    if not rate:
-        return 1.0
-
-    normalized_rate = rate.strip()
-    if not normalized_rate:
-        return 1.0
-
-    if normalized_rate.endswith("%"):
-        try:
-            percentage = float(normalized_rate[:-1])
-        except ValueError:
-            return 1.0
-        return max(0.1, 1.0 + (percentage / 100.0))
-
-    try:
-        return max(0.1, float(normalized_rate))
-    except ValueError:
-        return 1.0

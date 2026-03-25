@@ -68,6 +68,7 @@ const asr = createAsrModule({
     requestJson,
     responseToError,
     setRunStatus: status.setRunStatus,
+    stopSpeechPlayback: tts.stopSpeechPlayback,
 });
 
 tts.bindHooks({

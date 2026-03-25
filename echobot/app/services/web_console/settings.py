@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from ....runtime.settings import RuntimeSettingsStore
+from ....runtime.settings import RuntimeSettings, RuntimeSettingsStore
 
 
 class WebRuntimeSettingsService:
@@ -12,6 +12,9 @@ class WebRuntimeSettingsService:
         self._store = RuntimeSettingsStore(
             workspace / ".echobot" / "runtime_settings.json",
         )
+
+    async def load_settings(self) -> RuntimeSettings:
+        return await asyncio.to_thread(self._store.load)
 
     async def save_settings(
         self,
@@ -22,6 +25,17 @@ class WebRuntimeSettingsService:
             self._store.update_named_value,
             "delegated_ack_enabled",
             bool(delegated_ack_enabled),
+        )
+        return settings.to_dict()
+
+    async def save_selected_asr_provider(
+        self,
+        provider_name: str,
+    ) -> dict[str, Any]:
+        settings = await asyncio.to_thread(
+            self._store.update_named_value,
+            "selected_asr_provider",
+            provider_name,
         )
         return settings.to_dict()
 

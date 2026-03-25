@@ -39,6 +39,18 @@ class WebConsoleService:
     def asr_service(self) -> ASRService:
         return self._asr_service
 
+    async def initialize_runtime_settings(self) -> bool:
+        settings = await self._runtime_settings_service.load_settings()
+        selected_asr_provider = settings.selected_asr_provider
+        if not selected_asr_provider:
+            return False
+
+        try:
+            await self._asr_service.set_selected_asr_provider(selected_asr_provider)
+        except ValueError:
+            return False
+        return True
+
     async def build_frontend_config(
         self,
         *,
@@ -66,7 +78,10 @@ class WebConsoleService:
                     provider_name: self._tts_service.default_voice_for(provider_name)
                     for provider_name in self._tts_service.provider_names()
                 },
-                "providers": self._tts_service.providers_status(),
+                "providers": [
+                    asdict(status)
+                    for status in self._tts_service.providers_status()
+                ],
             },
         }
 
@@ -81,6 +96,11 @@ class WebConsoleService:
         return await self._runtime_settings_service.save_settings(
             delegated_ack_enabled=delegated_ack_enabled,
         )
+
+    async def set_selected_asr_provider(self, provider_name: str) -> dict[str, Any]:
+        await self._asr_service.set_selected_asr_provider(provider_name)
+        await self._runtime_settings_service.save_selected_asr_provider(provider_name)
+        return asdict(await self._asr_service.status_snapshot())
 
     def resolve_live2d_asset(self, asset_path: str) -> Path:
         return self._live2d_service.resolve_asset(asset_path)

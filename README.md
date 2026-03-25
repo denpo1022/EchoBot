@@ -133,18 +133,27 @@ Live2D 默认开启眼神鼠标跟随的功能，可在面板中关闭。
   <img src="./assets/webui_background.png" width="50%">
 </p>
 
-### 🖼️ 图像上传
+### 🖼️ 图像上传与下载
 
 对于支持视觉理解的模型（例如`qwen3.5-plus`，`kimi-k2.5`
-），可以直接发送图片给小助手。
+），可以直接发送图片给小助手，小助手也可以发送图片给你喵~
 
-> 💡 **提示**：如果模型不支持视觉输入，建议在项目的 `.env` 文件中配置 `ECHOBOT_LLM_SUPPORTS_IMAGE_INPUT=false`，减少小助手的误操作喵~
+> 💡 **提示**：如果接入的模型**不支持**视觉输入，建议在项目的 `.env` 文件中配置 `ECHOBOT_LLM_SUPPORTS_IMAGE_INPUT=false`，减少小助手的误操作喵~
 
 <p align="center">
-  <img src="./assets/webui_image.png" width="100%">
+  <img src="./assets/webui_image_1.png" width="77%">
+  <img src="./assets/webui_image_2.png" width="22%">
 </p>
 
 > 展示所用的 Live2D 模型来自：[【超精致Live2D量贩模型】兔兔这么可爱，当然要一口吃掉你！](https://www.bilibili.com/video/BV1YG6zYzEnN)
+
+### 📁 文件上传和下载
+
+除了图片，小助手也能帮你处理各类文件:
+
+<p align="center">
+  <img src="./assets/webui_file.png" width="100%">
+</p>
 
 ### ⏰ 定时与周期任务管理
 
@@ -181,20 +190,50 @@ EchoBot 网页端支持半双工语音交互。可在控制面板灵活切换语
 
 **🗣️ 语音合成 (TTS):**
 
-支持两个免费backend：
+内置两个免费模型：
 
 * [edge-tts](https://github.com/rany2/edge-tts)：在线合成，免费且无需 API Key。
-* [kokoro-multi-lang-v1_1](https://k2-fsa.github.io/sherpa/onnx/tts/all/Chinese-English/kokoro-multi-lang-v1_1.html)：本地离线合成，首次启动会自动下载权重文件。
+* [kokoro-multi-lang-v1_1](https://k2-fsa.github.io/sherpa/onnx/tts/all/Chinese-English/kokoro-multi-lang-v1_1.html)：本地离线合成。在第一次调用该模型时，会自动下载权重文件。
 
 <p align="center">
   <img src="./assets/webui_tts.png" width="75%">
 </p>
 
-🎙️ 语音输入 (ASR):
+**🎙️ 语音输入 (ASR):**
 
-基于sherpa-onnx的 [Sensevoice](https://k2-fsa.github.io/sherpa/onnx/sense-voice/index.html) 模型，本地离线识别，首次启动会自动下载权重文件。
+内置基于sherpa-onnx的 [Sensevoice](https://k2-fsa.github.io/sherpa/onnx/sense-voice/index.html) 模型，本地离线识别，首次启动会自动下载权重文件。
 
 EchoBot 网页端支持半双工语音交互（播报期间会自动暂停收音防回声），并支持“按住录音”与“常开麦克风”模式。
+
+### 🔌 进阶：接入自定义语音模型
+
+EchoBot 支持 **OpenAI 协议** 的TTS和ASR接口，可以将内置语音模型换成专属的本地/云端服务：
+
+<p align="center">
+<img src="./assets/webui_custom_1.png" width="50%" alt="Router Mode">
+</p>
+
+**🗣️ 自定义 TTS：**
+
+支持兼容 `OpenAI Speech API` 的服务。
+
+例如：使用 [vLLM Omni Speech](https://docs.vllm.ai/projects/vllm-omni/en/latest/serving/speech_api/) 在本地部署 `Qwen3-TTS` 或 `Fish Speech S2 Pro`等语音合成模型。启动vllm服务后，在 `.env` 文件中配置接口地址、模型名称等：
+
+```text
+ECHOBOT_TTS_OPENAI_MODEL=Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
+ECHOBOT_TTS_OPENAI_BASE_URL=http://localhost:8091/v1
+```
+
+**🎙️ 自定义 ASR：**
+
+支持兼容 `OpenAI Transcriptions API` 的服务。 
+
+例如：按照 [vllm文档](https://docs.vllm.com.cn/projects/recipes/en/latest/Qwen/Qwen3-ASR.html) 部署 `Qwen3-ASR`。启动vllm服务后，在 `.env` 文件中配置接口地址、模型名称等：
+
+```text
+ECHOBOT_ASR_OPENAI_MODEL=Qwen/Qwen3-ASR-0.6B
+ECHOBOT_ASR_OPENAI_BASE_URL=http://localhost:8080/v1
+```
 
 ### 💡 调整光影效果
 

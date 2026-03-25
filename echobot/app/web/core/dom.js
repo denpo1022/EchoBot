@@ -5,6 +5,7 @@ export const DOM = {
     agentTraceSummaryText: document.getElementById("agent-trace-summary-text"),
     alwaysListenCheckbox: document.getElementById("always-listen-checkbox"),
     asrDetail: document.getElementById("asr-detail"),
+    asrProviderSelect: document.getElementById("asr-provider-select"),
     autoTtsCheckbox: document.getElementById("auto-tts-checkbox"),
     chatPanel: document.getElementById("chat-panel"),
     composerFileButton: document.getElementById("composer-file-button"),

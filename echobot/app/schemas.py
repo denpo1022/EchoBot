@@ -228,6 +228,7 @@ class WebTTSProviderModel(BaseModel):
     name: str
     label: str
     available: bool = True
+    state: str = "ready"
     detail: str = ""
 
 
@@ -238,15 +239,31 @@ class WebTTSConfigModel(BaseModel):
     providers: list[WebTTSProviderModel] = Field(default_factory=list)
 
 
+class WebSpeechProviderModel(BaseModel):
+    kind: str = "asr"
+    name: str = ""
+    label: str = ""
+    selected: bool = False
+    available: bool = False
+    state: str = "missing"
+    detail: str = ""
+    resource_directory: str = ""
+
+
 class WebASRConfigModel(BaseModel):
     available: bool = False
     state: str = "missing"
     detail: str = ""
-    auto_download: bool = True
-    model_directory: str = ""
     sample_rate: int = 16000
-    provider: str = "cpu"
-    always_listen_supported: bool = True
+    selected_asr_provider: str = ""
+    selected_vad_provider: str = ""
+    always_listen_supported: bool = False
+    asr_providers: list[WebSpeechProviderModel] = Field(default_factory=list)
+    vad_providers: list[WebSpeechProviderModel] = Field(default_factory=list)
+
+
+class UpdateWebASRProviderRequest(BaseModel):
+    provider: str = ""
 
 
 class WebLive2DModelOptionModel(BaseModel):

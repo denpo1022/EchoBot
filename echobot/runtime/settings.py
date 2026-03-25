@@ -9,6 +9,7 @@ from typing import Any
 @dataclass(slots=True)
 class RuntimeSettings:
     delegated_ack_enabled: bool | None = None
+    selected_asr_provider: str | None = None
     extra_values: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -22,31 +23,50 @@ class RuntimeSettings:
         else:
             raise ValueError("delegated_ack_enabled must be a boolean")
 
+        raw_asr_provider = extra_values.pop("selected_asr_provider", None)
+        if raw_asr_provider is None:
+            selected_asr_provider = None
+        elif isinstance(raw_asr_provider, str):
+            selected_asr_provider = raw_asr_provider.strip() or None
+        else:
+            raise ValueError("selected_asr_provider must be a string")
+
         return cls(
             delegated_ack_enabled=delegated_ack_enabled,
+            selected_asr_provider=selected_asr_provider,
             extra_values=extra_values,
         )
 
     def to_dict(self) -> dict[str, Any]:
         data = dict(self.extra_values)
-        data.update(
-            {
-                "delegated_ack_enabled": self.delegated_ack_enabled,
-            }
-        )
+        data["delegated_ack_enabled"] = self.delegated_ack_enabled
+        if self.selected_asr_provider is not None:
+            data["selected_asr_provider"] = self.selected_asr_provider
         return data
 
     def get_named_value(self, name: str) -> Any:
         if name == "delegated_ack_enabled":
             return self.delegated_ack_enabled
+        if name == "selected_asr_provider":
+            return self.selected_asr_provider
         raise KeyError(name)
 
     def set_named_value(self, name: str, value: Any) -> None:
-        if name != "delegated_ack_enabled":
-            raise KeyError(name)
-        if value is not None and not isinstance(value, bool):
-            raise ValueError("delegated_ack_enabled must be a boolean")
-        self.delegated_ack_enabled = value
+        if name == "delegated_ack_enabled":
+            if value is not None and not isinstance(value, bool):
+                raise ValueError("delegated_ack_enabled must be a boolean")
+            self.delegated_ack_enabled = value
+            return
+        if name == "selected_asr_provider":
+            if value is None:
+                self.selected_asr_provider = None
+                return
+            if not isinstance(value, str):
+                raise ValueError("selected_asr_provider must be a string")
+            normalized_value = value.strip()
+            self.selected_asr_provider = normalized_value or None
+            return
+        raise KeyError(name)
 
 
 class RuntimeSettingsStore:

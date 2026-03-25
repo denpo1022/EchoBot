@@ -5,88 +5,56 @@ import {
     audioState,
     chatState,
 } from "../core/store.js";
+import { buildWavBlob, createAsrAudioCaptureController } from "./asr/audio.js";
+import { findAsrProviderStatus, normalizeAsrConfig } from "./asr/config.js";
+import { createVoicePromptQueue } from "./asr/prompts.js";
+import { createRealtimeAsrClient } from "./asr/realtime.js";
 
 export function createAsrModule(deps) {
     const {
         addSystemMessage,
         clamp,
-        delay,
         ensureAudioContextReady,
         requestJson,
         responseToError,
         setRunStatus,
+        stopSpeechPlayback,
     } = deps;
 
-    function normalizeAsrConfig(asrConfig) {
-        return {
-            available: Boolean(asrConfig && asrConfig.available),
-            state: String((asrConfig && asrConfig.state) || "missing"),
-            detail: String((asrConfig && asrConfig.detail) || ""),
-            auto_download: Boolean(asrConfig && asrConfig.auto_download),
-            model_directory: String((asrConfig && asrConfig.model_directory) || ""),
-            sample_rate: Number((asrConfig && asrConfig.sample_rate) || 16000),
-            provider: String((asrConfig && asrConfig.provider) || "cpu"),
-            always_listen_supported: Boolean(
-                asrConfig && Object.prototype.hasOwnProperty.call(asrConfig, "always_listen_supported")
-                    ? asrConfig.always_listen_supported
-                    : true,
-            ),
-        };
-    }
+    const promptQueue = createVoicePromptQueue({
+        setRunStatus: setRunStatus,
+    });
+    const audioCapture = createAsrAudioCaptureController({
+        clamp: clamp,
+        ensureAudioContextReady: ensureAudioContextReady,
+        getTargetSampleRate: currentSampleRate,
+        onChunk: handleCapturedPcmChunk,
+    });
+    const realtimeClient = createRealtimeAsrClient({
+        onEvent: handleRealtimeEvent,
+        onUnexpectedClose: handleUnexpectedSocketClose,
+    });
 
     function applyAsrStatus(asrConfig) {
         asrState.asrConfig = normalizeAsrConfig(asrConfig);
+        renderAsrProviderOptions(asrState.asrConfig);
         if (DOM.asrDetail) {
             DOM.asrDetail.textContent = buildAsrDetailText();
         }
         updateVoiceInputControls();
-        if (asrState.asrConfig.available) {
+        if (!shouldPollAsrStatus(asrState.asrConfig)) {
             stopAsrStatusPolling();
         }
     }
 
-    function buildAsrDetailText() {
-        if (asrState.microphoneCaptureMode === "manual") {
-            return "正在录音，再次点击麦克风结束。";
-        }
-        if (asrState.alwaysListenEnabled) {
-            return asrState.alwaysListenPaused
-                ? "常开麦已开启，回复期间暂停收音。"
-                : "常开麦已开启，正在等待你说话。";
-        }
-        if (!asrState.asrConfig) {
-            return "语音识别尚未初始化。";
-        }
-        return asrState.asrConfig.detail || "语音识别未就绪。";
-    }
-
     function startAsrStatusPolling() {
-        if (asrState.asrStatusPollTimerId || (asrState.asrConfig && asrState.asrConfig.available)) {
+        if (asrState.asrStatusPollTimerId || !shouldPollAsrStatus(asrState.asrConfig)) {
             return;
         }
 
         asrState.asrStatusPollTimerId = window.setInterval(() => {
             void refreshAsrStatus();
         }, ASR_STATUS_POLL_INTERVAL_MS);
-    }
-
-    function stopAsrStatusPolling() {
-        if (!asrState.asrStatusPollTimerId) {
-            return;
-        }
-        window.clearInterval(asrState.asrStatusPollTimerId);
-        asrState.asrStatusPollTimerId = 0;
-    }
-
-    async function refreshAsrStatus() {
-        try {
-            applyAsrStatus(await requestJson("/api/web/asr/status"));
-        } catch (error) {
-            console.error("Failed to refresh ASR status", error);
-            if (DOM.asrDetail && !asrState.asrConfig) {
-                DOM.asrDetail.textContent = error.message || "语音识别状态获取失败";
-            }
-        }
     }
 
     function updateVoiceInputControls() {
@@ -99,7 +67,6 @@ export function createAsrModule(deps) {
                 !asrReady
                 || asrState.alwaysListenEnabled
                 || chatState.chatBusy
-                || audioState.speaking
             );
             DOM.recordButton.classList.toggle("is-recording", manualRecording);
             DOM.recordButton.setAttribute("aria-pressed", manualRecording ? "true" : "false");
@@ -110,12 +77,79 @@ export function createAsrModule(deps) {
         if (DOM.alwaysListenCheckbox) {
             DOM.alwaysListenCheckbox.checked = asrState.alwaysListenEnabled;
             DOM.alwaysListenCheckbox.disabled = !asrReady
+                || !(asrState.asrConfig && asrState.asrConfig.always_listen_supported)
                 || manualRecording
                 || (backgroundJobRunning && !asrState.alwaysListenEnabled);
         }
 
+        if (DOM.asrProviderSelect) {
+            const providerCount = asrState.asrConfig && Array.isArray(asrState.asrConfig.asr_providers)
+                ? asrState.asrConfig.asr_providers.length
+                : 0;
+            DOM.asrProviderSelect.disabled = providerCount <= 1
+                || manualRecording
+                || asrState.asrProviderUpdating;
+        }
+
         if (DOM.asrDetail) {
             DOM.asrDetail.textContent = buildAsrDetailText();
+        }
+    }
+
+    async function handleAsrProviderChange() {
+        if (!DOM.asrProviderSelect || !asrState.asrConfig) {
+            return;
+        }
+
+        const nextProvider = String(DOM.asrProviderSelect.value || "").trim();
+        const currentProvider = String(asrState.asrConfig.selected_asr_provider || "").trim();
+        if (!nextProvider || nextProvider === currentProvider) {
+            DOM.asrProviderSelect.value = currentProvider;
+            return;
+        }
+
+        if (asrState.microphoneCaptureMode === "manual") {
+            DOM.asrProviderSelect.value = currentProvider;
+            addSystemMessage("请先结束当前录音，再切换 ASR 语音识别模型。");
+            return;
+        }
+
+        if (asrState.alwaysListenEnabled) {
+            if (DOM.alwaysListenCheckbox) {
+                DOM.alwaysListenCheckbox.checked = false;
+            }
+            await stopAlwaysListen();
+        }
+
+        asrState.asrProviderUpdating = true;
+        updateVoiceInputControls();
+        setRunStatus("正在切换 ASR 语音识别模型...");
+
+        try {
+            const payload = await requestJson("/api/web/asr/provider", {
+                method: "PATCH",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    provider: nextProvider,
+                }),
+            });
+            applyAsrStatus(payload);
+            const providerStatus = findAsrProviderStatus(payload, nextProvider);
+            setRunStatus(
+                providerStatus && providerStatus.available
+                    ? `${providerStatus.label} 已启用`
+                    : "ASR 语音识别模型已切换，正在等待就绪。",
+            );
+        } catch (error) {
+            console.error(error);
+            DOM.asrProviderSelect.value = currentProvider;
+            addSystemMessage(`切换 ASR 语音识别模型失败：${error.message || error}`);
+            setRunStatus(error.message || "切换 ASR 语音识别模型失败");
+        } finally {
+            asrState.asrProviderUpdating = false;
+            updateVoiceInputControls();
         }
     }
 
@@ -125,55 +159,6 @@ export function createAsrModule(deps) {
             return;
         }
         await startManualRecording();
-    }
-
-    async function startManualRecording() {
-        if (!asrState.asrConfig || !asrState.asrConfig.available) {
-            addSystemMessage("语音识别还没准备好。");
-            return;
-        }
-        if (chatState.chatBusy || audioState.speaking) {
-            addSystemMessage("当前正在回复，请稍后再录音。");
-            return;
-        }
-        if (asrState.alwaysListenEnabled) {
-            if (DOM.alwaysListenCheckbox) {
-                DOM.alwaysListenCheckbox.checked = false;
-            }
-            await stopAlwaysListen();
-        }
-
-        await ensureMicrophoneCaptureReady();
-        asrState.manualRecordingChunks = [];
-        asrState.microphoneCaptureMode = "manual";
-        updateVoiceInputControls();
-        setRunStatus("正在录音…");
-    }
-
-    async function stopManualRecording() {
-        if (asrState.microphoneCaptureMode !== "manual") {
-            return;
-        }
-
-        asrState.microphoneCaptureMode = "idle";
-        updateVoiceInputControls();
-        const wavBlob = buildWavBlob(asrState.manualRecordingChunks, 16000);
-        asrState.manualRecordingChunks = [];
-        stopMicrophoneCapture();
-
-        if (!wavBlob) {
-            setRunStatus("未录到有效语音");
-            addSystemMessage("未录到有效语音。");
-            return;
-        }
-
-        try {
-            await transcribeAndQueueWavBlob(wavBlob);
-        } catch (error) {
-            console.error(error);
-            addSystemMessage(`语音识别失败：${error.message || error}`);
-            setRunStatus(error.message || "语音识别失败");
-        }
     }
 
     async function handleAlwaysListenToggle() {
@@ -198,16 +183,164 @@ export function createAsrModule(deps) {
         await stopAlwaysListen();
     }
 
+    function handleBeforeUnload() {
+        void realtimeClient.close();
+        audioCapture.stopMicrophoneCapture();
+    }
+
+    return {
+        applyAsrStatus: applyAsrStatus,
+        drainVoicePromptQueue: promptQueue.drainVoicePromptQueue,
+        handleAlwaysListenToggle: handleAlwaysListenToggle,
+        handleAsrProviderChange: handleAsrProviderChange,
+        handleBeforeUnload: handleBeforeUnload,
+        handleRecordButtonClick: handleRecordButtonClick,
+        startAsrStatusPolling: startAsrStatusPolling,
+        updateVoiceInputControls: updateVoiceInputControls,
+    };
+
+    function renderAsrProviderOptions(asrConfig) {
+        if (!DOM.asrProviderSelect) {
+            return;
+        }
+
+        DOM.asrProviderSelect.innerHTML = "";
+        const providers = Array.isArray(asrConfig && asrConfig.asr_providers)
+            ? asrConfig.asr_providers
+            : [];
+
+        providers.forEach((providerStatus) => {
+            const option = document.createElement("option");
+            option.value = providerStatus.name;
+            option.textContent = providerStatus.available
+                ? providerStatus.label
+                : `${providerStatus.label}（未就绪）`;
+            DOM.asrProviderSelect.appendChild(option);
+        });
+
+        DOM.asrProviderSelect.disabled = providers.length <= 1 || asrState.asrProviderUpdating;
+        if (asrConfig && asrConfig.selected_asr_provider) {
+            DOM.asrProviderSelect.value = asrConfig.selected_asr_provider;
+        }
+    }
+
+    function shouldPollAsrStatus(asrConfig) {
+        if (!asrConfig) {
+            return true;
+        }
+        if (!asrConfig.available) {
+            return true;
+        }
+        return Boolean(
+            asrConfig.selected_vad_provider
+            && !asrConfig.always_listen_supported,
+        );
+    }
+
+    function buildAsrDetailText() {
+        if (asrState.microphoneCaptureMode === "manual") {
+            return "正在录音，再次点击麦克风结束。";
+        }
+        if (asrState.alwaysListenEnabled) {
+            return asrState.alwaysListenPaused
+                ? "常开麦已开启，回复期间暂停收音。"
+                : "常开麦已开启，正在等待你说话。";
+        }
+        if (!asrState.asrConfig) {
+            return "语音识别尚未初始化。";
+        }
+        return asrState.asrConfig.detail || "语音识别未就绪。";
+    }
+
+    function stopAsrStatusPolling() {
+        if (!asrState.asrStatusPollTimerId) {
+            return;
+        }
+        window.clearInterval(asrState.asrStatusPollTimerId);
+        asrState.asrStatusPollTimerId = 0;
+    }
+
+    async function refreshAsrStatus() {
+        try {
+            applyAsrStatus(await requestJson("/api/web/asr/status"));
+        } catch (error) {
+            console.error("Failed to refresh ASR status", error);
+            if (DOM.asrDetail && !asrState.asrConfig) {
+                DOM.asrDetail.textContent = error.message || "语音识别状态获取失败";
+            }
+        }
+    }
+
+    async function startManualRecording() {
+        if (!asrState.asrConfig || !asrState.asrConfig.available) {
+            addSystemMessage("语音识别还没准备好。");
+            return;
+        }
+        if (chatState.chatBusy) {
+            addSystemMessage("当前正在回复，请稍后再录音。");
+            return;
+        }
+        if (asrState.alwaysListenEnabled) {
+            if (DOM.alwaysListenCheckbox) {
+                DOM.alwaysListenCheckbox.checked = false;
+            }
+            await stopAlwaysListen();
+        }
+
+        if (audioState.activeSpeechSession || audioState.audioSourceNode || audioState.speaking) {
+            stopSpeechPlayback();
+        }
+        await audioCapture.ensureMicrophoneCaptureReady();
+        asrState.manualRecordingChunks = [];
+        asrState.microphoneCaptureMode = "manual";
+        updateVoiceInputControls();
+        setRunStatus("正在录音...");
+    }
+
+    async function stopManualRecording() {
+        if (asrState.microphoneCaptureMode !== "manual") {
+            return;
+        }
+
+        asrState.microphoneCaptureMode = "idle";
+        updateVoiceInputControls();
+        const wavBlob = buildWavBlob(asrState.manualRecordingChunks, currentSampleRate());
+        asrState.manualRecordingChunks = [];
+        audioCapture.stopMicrophoneCapture();
+
+        if (!wavBlob) {
+            setRunStatus("未录到有效语音");
+            addSystemMessage("未录到有效语音。");
+            return;
+        }
+
+        try {
+            await transcribeAndQueueWavBlob(wavBlob);
+        } catch (error) {
+            console.error(error);
+            addSystemMessage(`语音识别失败：${error.message || error}`);
+            setRunStatus(error.message || "语音识别失败");
+        }
+    }
+
     async function startAlwaysListen() {
         if (!asrState.asrConfig || !asrState.asrConfig.available) {
             throw new Error("语音识别还没准备好。");
+        }
+        if (!asrState.asrConfig.always_listen_supported) {
+            throw new Error("当前 ASR / VAD 配置不支持常开麦。");
         }
         if (asrState.microphoneCaptureMode === "manual") {
             await stopManualRecording();
         }
 
-        await ensureMicrophoneCaptureReady();
-        await openAsrSocket();
+        try {
+            await audioCapture.ensureMicrophoneCaptureReady();
+            await realtimeClient.open();
+        } catch (error) {
+            audioCapture.stopMicrophoneCapture();
+            throw error;
+        }
 
         asrState.alwaysListenEnabled = true;
         asrState.alwaysListenPaused = chatState.chatBusy || audioState.speaking;
@@ -226,114 +359,12 @@ export function createAsrModule(deps) {
         asrState.microphoneCaptureMode = "idle";
         updateVoiceInputControls();
 
-        await closeAsrSocket(true);
-        stopMicrophoneCapture();
+        await realtimeClient.close({ flushFirst: true });
+        audioCapture.stopMicrophoneCapture();
         setRunStatus("常开麦已关闭");
     }
 
-    async function ensureMicrophoneCaptureReady() {
-        if (asrState.microphoneStream && asrState.microphoneProcessorNode) {
-            return;
-        }
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            throw new Error("当前浏览器不支持麦克风采集。");
-        }
-
-        await ensureAudioContextReady();
-        if (!audioState.audioContext) {
-            throw new Error("当前浏览器不支持 Web Audio。");
-        }
-        if (!audioState.audioContext.audioWorklet || typeof AudioWorkletNode === "undefined") {
-            throw new Error("当前浏览器不支持 AudioWorklet。");
-        }
-
-        if (!asrState.microphoneWorkletLoaded) {
-            await audioState.audioContext.audioWorklet.addModule("/web/assets/pcm-recorder-worklet.js");
-            asrState.microphoneWorkletLoaded = true;
-        }
-
-        const stream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-                channelCount: 1,
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true,
-            },
-        });
-
-        const sourceNode = audioState.audioContext.createMediaStreamSource(stream);
-        const processorNode = new AudioWorkletNode(
-            audioState.audioContext,
-            "pcm-recorder-processor",
-        );
-        const muteNode = audioState.audioContext.createGain();
-        muteNode.gain.value = 0;
-
-        processorNode.port.onmessage = handleMicrophoneChunk;
-        sourceNode.connect(processorNode);
-        processorNode.connect(muteNode);
-        muteNode.connect(audioState.audioContext.destination);
-
-        asrState.microphoneStream = stream;
-        asrState.microphoneSourceNode = sourceNode;
-        asrState.microphoneProcessorNode = processorNode;
-        asrState.microphoneMuteNode = muteNode;
-        asrState.microphoneChunkResampler = new PcmChunkResampler(
-            audioState.audioContext.sampleRate,
-            16000,
-        );
-    }
-
-    function stopMicrophoneCapture() {
-        if (asrState.microphoneSourceNode) {
-            try {
-                asrState.microphoneSourceNode.disconnect();
-            } catch (error) {
-                console.warn("Microphone source disconnect ignored", error);
-            }
-        }
-        if (asrState.microphoneProcessorNode) {
-            try {
-                asrState.microphoneProcessorNode.port.onmessage = null;
-                asrState.microphoneProcessorNode.disconnect();
-            } catch (error) {
-                console.warn("Microphone processor disconnect ignored", error);
-            }
-        }
-        if (asrState.microphoneMuteNode) {
-            try {
-                asrState.microphoneMuteNode.disconnect();
-            } catch (error) {
-                console.warn("Microphone mute disconnect ignored", error);
-            }
-        }
-        if (asrState.microphoneStream) {
-            asrState.microphoneStream.getTracks().forEach((track) => {
-                track.stop();
-            });
-        }
-
-        asrState.microphoneStream = null;
-        asrState.microphoneSourceNode = null;
-        asrState.microphoneProcessorNode = null;
-        asrState.microphoneMuteNode = null;
-        asrState.microphoneChunkResampler = null;
-        if (asrState.microphoneCaptureMode !== "always") {
-            asrState.microphoneCaptureMode = "idle";
-        }
-    }
-
-    function handleMicrophoneChunk(event) {
-        const rawChunk = event && event.data ? event.data : null;
-        if (!(rawChunk instanceof Float32Array) || !asrState.microphoneChunkResampler) {
-            return;
-        }
-
-        const pcmChunk = asrState.microphoneChunkResampler.push(rawChunk);
-        if (!pcmChunk.length) {
-            return;
-        }
-
+    function handleCapturedPcmChunk(pcmChunk) {
         if (asrState.microphoneCaptureMode === "manual") {
             asrState.manualRecordingChunks.push(pcmChunk);
             return;
@@ -347,7 +378,7 @@ export function createAsrModule(deps) {
         if (shouldPause) {
             if (!asrState.alwaysListenPaused) {
                 asrState.alwaysListenPaused = true;
-                sendAsrSocketControl("reset");
+                realtimeClient.sendControl("reset");
                 updateVoiceInputControls();
             }
             return;
@@ -358,11 +389,11 @@ export function createAsrModule(deps) {
             updateVoiceInputControls();
         }
 
-        sendAsrSocketChunk(pcmChunk);
+        realtimeClient.sendChunk(pcmChunk);
     }
 
     async function transcribeAndQueueWavBlob(wavBlob) {
-        setRunStatus("正在识别语音…");
+        setRunStatus("正在识别语音...");
         const response = await fetch("/api/web/asr", {
             method: "POST",
             headers: {
@@ -383,156 +414,16 @@ export function createAsrModule(deps) {
             return;
         }
 
-        enqueueVoicePrompt(text, "录音");
+        promptQueue.enqueueVoicePrompt(text, "录音");
     }
 
-    function enqueueVoicePrompt(text, sourceLabel) {
-        const prompt = String(text || "").trim();
-        if (!prompt) {
-            return;
-        }
-
-        asrState.voicePromptQueue.push({
-            text: prompt,
-            sourceLabel: sourceLabel || "语音",
-        });
-        void drainVoicePromptQueue();
-    }
-
-    async function drainVoicePromptQueue() {
-        if (
-            chatState.chatBusy
-            || audioState.speaking
-            || !asrState.voicePromptQueue.length
-        ) {
-            return;
-        }
-
-        const nextPrompt = asrState.voicePromptQueue.shift();
-        if (!nextPrompt) {
-            return;
-        }
-
-        DOM.promptInput.value = nextPrompt.text;
-        setRunStatus(`${nextPrompt.sourceLabel}已识别，准备发送…`);
-        document.getElementById("chat-form").requestSubmit();
-    }
-
-    async function openAsrSocket() {
-        if (asrState.asrSocket && asrState.asrSocket.readyState <= WebSocket.OPEN) {
-            return;
-        }
-
-        const url = buildAsrSocketUrl();
-        asrState.asrSocketIntentionalClose = false;
-        const socket = new WebSocket(url);
-        socket.binaryType = "arraybuffer";
-
-        socket.addEventListener("message", handleAsrSocketMessage);
-        socket.addEventListener("close", handleAsrSocketClose);
-        socket.addEventListener("error", (error) => {
-            console.error("ASR websocket error", error);
-        });
-
-        await new Promise((resolve, reject) => {
-            const timerId = window.setTimeout(() => {
-                reject(new Error("实时语音连接超时"));
-            }, 8000);
-
-            socket.addEventListener(
-                "open",
-                () => {
-                    window.clearTimeout(timerId);
-                    resolve();
-                },
-                { once: true },
-            );
-            socket.addEventListener(
-                "error",
-                () => {
-                    window.clearTimeout(timerId);
-                    reject(new Error("实时语音连接失败"));
-                },
-                { once: true },
-            );
-        });
-
-        asrState.asrSocket = socket;
-    }
-
-    async function closeAsrSocket(flushFirst = false) {
-        const socket = asrState.asrSocket;
-        if (!socket) {
-            return;
-        }
-
-        if (flushFirst && socket.readyState === WebSocket.OPEN) {
-            sendAsrSocketControl("flush");
-            await delay(160);
-        }
-
-        asrState.asrSocketIntentionalClose = true;
-        asrState.asrSocket = null;
-        try {
-            socket.close();
-        } catch (error) {
-            console.warn("ASR websocket close ignored", error);
-        }
-    }
-
-    function handleBeforeUnload() {
-        if (asrState.asrSocket) {
-            try {
-                asrState.asrSocket.close();
-            } catch (error) {
-                console.warn("ASR websocket close ignored during unload", error);
-            }
-        }
-        stopMicrophoneCapture();
-    }
-
-    function buildAsrSocketUrl() {
-        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-        return `${protocol}//${window.location.host}/api/web/asr/ws`;
-    }
-
-    function sendAsrSocketControl(command) {
-        if (!asrState.asrSocket || asrState.asrSocket.readyState !== WebSocket.OPEN) {
-            return;
-        }
-        asrState.asrSocket.send(String(command || ""));
-    }
-
-    function sendAsrSocketChunk(int16Chunk) {
-        if (!asrState.asrSocket || asrState.asrSocket.readyState !== WebSocket.OPEN) {
-            return;
-        }
-        asrState.asrSocket.send(
-            int16Chunk.buffer.slice(
-                int16Chunk.byteOffset,
-                int16Chunk.byteOffset + int16Chunk.byteLength,
-            ),
-        );
-    }
-
-    function handleAsrSocketMessage(event) {
-        if (!event || typeof event.data !== "string") {
-            return;
-        }
-
-        let payload;
-        try {
-            payload = JSON.parse(event.data);
-        } catch (error) {
-            console.warn("Failed to parse ASR websocket payload", error);
-            return;
-        }
-
+    function handleRealtimeEvent(payload) {
         if (payload.type === "ready") {
             if (asrState.asrConfig) {
                 applyAsrStatus({
                     ...asrState.asrConfig,
                     available: true,
+                    sample_rate: Number(payload.sample_rate) || asrState.asrConfig.sample_rate,
                     state: String(payload.state || "ready"),
                     detail: String(payload.detail || asrState.asrConfig.detail || ""),
                 });
@@ -540,15 +431,15 @@ export function createAsrModule(deps) {
             return;
         }
         if (payload.type === "speech_start") {
-            setRunStatus("正在听你说…");
+            setRunStatus("正在听你说...");
             return;
         }
         if (payload.type === "speech_end") {
-            setRunStatus("正在识别语音…");
+            setRunStatus("正在识别语音...");
             return;
         }
         if (payload.type === "transcript") {
-            enqueueVoicePrompt(payload.text, "语音");
+            promptQueue.enqueueVoicePrompt(payload.text, "语音");
             return;
         }
         if (payload.type === "error") {
@@ -556,154 +447,24 @@ export function createAsrModule(deps) {
         }
     }
 
-    function handleAsrSocketClose() {
-        const intentional = asrState.asrSocketIntentionalClose;
-        asrState.asrSocket = null;
-        asrState.asrSocketIntentionalClose = false;
-
-        if (intentional) {
+    function handleUnexpectedSocketClose() {
+        if (!asrState.alwaysListenEnabled) {
             return;
         }
 
-        if (asrState.alwaysListenEnabled) {
-            asrState.alwaysListenEnabled = false;
-            asrState.alwaysListenPaused = false;
-            asrState.microphoneCaptureMode = "idle";
-            if (DOM.alwaysListenCheckbox) {
-                DOM.alwaysListenCheckbox.checked = false;
-            }
-            stopMicrophoneCapture();
-            updateVoiceInputControls();
-            addSystemMessage("实时语音连接已断开。");
+        asrState.alwaysListenEnabled = false;
+        asrState.alwaysListenPaused = false;
+        asrState.microphoneCaptureMode = "idle";
+        if (DOM.alwaysListenCheckbox) {
+            DOM.alwaysListenCheckbox.checked = false;
         }
+        audioCapture.stopMicrophoneCapture();
+        updateVoiceInputControls();
+        addSystemMessage("实时语音连接已断开。");
     }
 
-    function buildWavBlob(chunks, sampleRate) {
-        const validChunks = Array.isArray(chunks)
-            ? chunks.filter((chunk) => chunk instanceof Int16Array && chunk.length > 0)
-            : [];
-        if (!validChunks.length) {
-            return null;
-        }
-
-        const totalSamples = validChunks.reduce((sum, chunk) => sum + chunk.length, 0);
-        const pcmBytes = totalSamples * 2;
-        const buffer = new ArrayBuffer(44 + pcmBytes);
-        const view = new DataView(buffer);
-        const merged = new Int16Array(buffer, 44, totalSamples);
-
-        let offset = 0;
-        validChunks.forEach((chunk) => {
-            merged.set(chunk, offset);
-            offset += chunk.length;
-        });
-
-        writeAscii(view, 0, "RIFF");
-        view.setUint32(4, 36 + pcmBytes, true);
-        writeAscii(view, 8, "WAVE");
-        writeAscii(view, 12, "fmt ");
-        view.setUint32(16, 16, true);
-        view.setUint16(20, 1, true);
-        view.setUint16(22, 1, true);
-        view.setUint32(24, sampleRate, true);
-        view.setUint32(28, sampleRate * 2, true);
-        view.setUint16(32, 2, true);
-        view.setUint16(34, 16, true);
-        writeAscii(view, 36, "data");
-        view.setUint32(40, pcmBytes, true);
-
-        return new Blob([buffer], { type: "audio/wav" });
+    function currentSampleRate() {
+        const sampleRate = Number(asrState.asrConfig && asrState.asrConfig.sample_rate);
+        return sampleRate > 0 ? sampleRate : 16000;
     }
-
-    function writeAscii(view, offset, text) {
-        for (let index = 0; index < text.length; index += 1) {
-            view.setUint8(offset + index, text.charCodeAt(index));
-        }
-    }
-
-    class PcmChunkResampler {
-        constructor(inputSampleRate, outputSampleRate) {
-            this.inputSampleRate = Number(inputSampleRate) || outputSampleRate;
-            this.outputSampleRate = Number(outputSampleRate) || 16000;
-            this.pendingChunk = new Float32Array(0);
-        }
-
-        push(floatChunk) {
-            if (!(floatChunk instanceof Float32Array) || !floatChunk.length) {
-                return new Int16Array(0);
-            }
-
-            const mergedChunk = mergeFloat32Chunks(this.pendingChunk, floatChunk);
-            if (!mergedChunk.length) {
-                return new Int16Array(0);
-            }
-
-            if (this.inputSampleRate === this.outputSampleRate) {
-                this.pendingChunk = new Float32Array(0);
-                return floatChunkToInt16(mergedChunk);
-            }
-
-            const ratio = this.inputSampleRate / this.outputSampleRate;
-            const outputLength = Math.floor(mergedChunk.length / ratio);
-            if (outputLength <= 0) {
-                this.pendingChunk = mergedChunk;
-                return new Int16Array(0);
-            }
-
-            const resampled = new Float32Array(outputLength);
-            for (let index = 0; index < outputLength; index += 1) {
-                const sourceIndex = index * ratio;
-                const leftIndex = Math.floor(sourceIndex);
-                const rightIndex = Math.min(leftIndex + 1, mergedChunk.length - 1);
-                const offset = sourceIndex - leftIndex;
-                resampled[index] = mergedChunk[leftIndex] * (1 - offset) + mergedChunk[rightIndex] * offset;
-            }
-
-            const consumedSamples = Math.floor(outputLength * ratio);
-            this.pendingChunk = consumedSamples < mergedChunk.length
-                ? mergedChunk.slice(consumedSamples)
-                : new Float32Array(0);
-            return floatChunkToInt16(resampled);
-        }
-    }
-
-    function mergeFloat32Chunks(leftChunk, rightChunk) {
-        if (!leftChunk.length) {
-            return rightChunk;
-        }
-        if (!rightChunk.length) {
-            return leftChunk;
-        }
-
-        const output = new Float32Array(leftChunk.length + rightChunk.length);
-        output.set(leftChunk, 0);
-        output.set(rightChunk, leftChunk.length);
-        return output;
-    }
-
-    function floatChunkToInt16(floatChunk) {
-        const output = new Int16Array(floatChunk.length);
-        for (let index = 0; index < floatChunk.length; index += 1) {
-            output[index] = floatToInt16Sample(floatChunk[index]);
-        }
-        return output;
-    }
-
-    function floatToInt16Sample(value) {
-        const sample = clamp(Number(value) || 0, -1, 1);
-        if (sample < 0) {
-            return Math.round(sample * 32768);
-        }
-        return Math.round(sample * 32767);
-    }
-
-    return {
-        applyAsrStatus: applyAsrStatus,
-        startAsrStatusPolling: startAsrStatusPolling,
-        updateVoiceInputControls: updateVoiceInputControls,
-        handleRecordButtonClick: handleRecordButtonClick,
-        handleAlwaysListenToggle: handleAlwaysListenToggle,
-        drainVoicePromptQueue: drainVoicePromptQueue,
-        handleBeforeUnload: handleBeforeUnload,
-    };
 }

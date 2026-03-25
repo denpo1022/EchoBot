@@ -4,7 +4,14 @@ import asyncio
 import tempfile
 from pathlib import Path
 
-from ..base import SynthesizedSpeech, TTSProvider, VoiceOption
+from ..base import (
+    SynthesizedSpeech,
+    TTSProvider,
+    TTSProviderStatus,
+    TTSSynthesisOptions,
+    VoiceOption,
+)
+from ..synthesis import edge_rate_from_speed
 
 
 class EdgeTTSProvider(TTSProvider):
@@ -22,12 +29,22 @@ class EdgeTTSProvider(TTSProvider):
     def default_voice(self) -> str:
         return self._default_voice
 
-    def availability(self) -> tuple[bool, str]:
+    def status(self) -> TTSProviderStatus:
         try:
             self._load_module()
         except RuntimeError as exc:
-            return False, str(exc)
-        return True, ""
+            return TTSProviderStatus(
+                name=self.name,
+                label=self.label,
+                available=False,
+                state="unavailable",
+                detail=str(exc),
+            )
+        return TTSProviderStatus(
+            name=self.name,
+            label=self.label,
+            available=True,
+        )
 
     async def list_voices(self) -> list[VoiceOption]:
         edge_tts = self._load_module()
@@ -48,24 +65,23 @@ class EdgeTTSProvider(TTSProvider):
         self,
         *,
         text: str,
-        voice: str | None = None,
-        rate: str | None = None,
-        volume: str | None = None,
-        pitch: str | None = None,
+        options: TTSSynthesisOptions | None = None,
     ) -> SynthesizedSpeech:
         edge_tts = self._load_module()
-        selected_voice = voice or self._default_voice
+        synthesis_options = options or TTSSynthesisOptions()
+        selected_voice = synthesis_options.voice or self._default_voice
 
         kwargs = {
             "text": text,
             "voice": selected_voice,
         }
+        rate = edge_rate_from_speed(synthesis_options.speed)
         if rate:
             kwargs["rate"] = rate
-        if volume:
-            kwargs["volume"] = volume
-        if pitch:
-            kwargs["pitch"] = pitch
+        if synthesis_options.volume:
+            kwargs["volume"] = synthesis_options.volume
+        if synthesis_options.pitch:
+            kwargs["pitch"] = synthesis_options.pitch
 
         with tempfile.TemporaryDirectory(prefix="echobot_tts_") as temp_dir:
             output_path = Path(temp_dir) / "speech.mp3"

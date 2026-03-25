@@ -22,6 +22,23 @@ class SynthesizedSpeech:
     voice: str
 
 
+@dataclass(slots=True, frozen=True)
+class TTSProviderStatus:
+    name: str
+    label: str
+    available: bool
+    state: str = "ready"
+    detail: str = ""
+
+
+@dataclass(slots=True, frozen=True)
+class TTSSynthesisOptions:
+    voice: str | None = None
+    speed: float | None = None
+    volume: str | None = None
+    pitch: str | None = None
+
+
 class TTSProvider(ABC):
     name: str
     label: str
@@ -31,8 +48,12 @@ class TTSProvider(ABC):
     def default_voice(self) -> str:
         raise NotImplementedError
 
-    def availability(self) -> tuple[bool, str]:
-        return True, ""
+    def status(self) -> TTSProviderStatus:
+        return TTSProviderStatus(
+            name=self.name,
+            label=self.label,
+            available=True,
+        )
 
     async def list_voices(self) -> list[VoiceOption]:
         return []
@@ -45,9 +66,6 @@ class TTSProvider(ABC):
         self,
         *,
         text: str,
-        voice: str | None = None,
-        rate: str | None = None,
-        volume: str | None = None,
-        pitch: str | None = None,
+        options: TTSSynthesisOptions | None = None,
     ) -> SynthesizedSpeech:
         raise NotImplementedError
