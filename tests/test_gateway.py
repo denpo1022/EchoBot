@@ -23,6 +23,7 @@ from echobot.orchestration import (
 )
 from echobot.providers.base import LLMProvider
 from echobot.runtime.bootstrap import RuntimeContext
+from echobot.runtime.settings import RuntimeConfigSnapshot, RuntimeControls
 from echobot.runtime.session_runner import SessionAgentRunner, SessionRunResult
 from echobot.runtime.sessions import SessionStore
 from echobot.scheduling.cron import CronJob, CronPayload, CronSchedule, CronService
@@ -167,6 +168,8 @@ def build_test_runtime(
         heartbeat_file_path=workspace / "HEARTBEAT.md",
         heartbeat_interval_seconds=60,
         tool_registry_factory=lambda *_args: None,
+        runtime_controls=RuntimeControls(),
+        default_runtime_config=RuntimeConfigSnapshot(),
     )
     return context, session_store
 

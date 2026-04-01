@@ -5,6 +5,7 @@ const SETTINGS_PANEL_STORAGE_KEY = "echobot.web.settings_panel_open";
 const CRON_PANEL_STORAGE_KEY = "echobot.web.cron_panel_open";
 const HEARTBEAT_PANEL_STORAGE_KEY = "echobot.web.heartbeat_panel_open";
 const LIVE2D_PANEL_STORAGE_KEY = "echobot.web.live2d_panel_open";
+const RUNTIME_PANEL_STORAGE_KEY = "echobot.web.runtime_panel_open";
 const STAGE_BACKGROUND_PANEL_STORAGE_KEY = "echobot.web.stage_background_panel_open";
 const STAGE_EFFECTS_PANEL_STORAGE_KEY = "echobot.web.stage_effects_panel_open";
 
@@ -47,6 +48,14 @@ export function createPanelController(deps) {
         DOM.heartbeatPanel.open = readBoolean(HEARTBEAT_PANEL_STORAGE_KEY, false);
     }
 
+    function restoreRuntimePanelState() {
+        if (!DOM.runtimePanel) {
+            return;
+        }
+
+        DOM.runtimePanel.open = readBoolean(RUNTIME_PANEL_STORAGE_KEY, true);
+    }
+
     function restoreStageBackgroundPanelState() {
         if (!DOM.stageBackgroundPanel) {
             return;
@@ -77,6 +86,12 @@ export function createPanelController(deps) {
         }
     }
 
+    function handleRuntimePanelToggle() {
+        if (DOM.runtimePanel) {
+            writeBoolean(RUNTIME_PANEL_STORAGE_KEY, DOM.runtimePanel.open);
+        }
+    }
+
     function handleStageBackgroundPanelToggle() {
         if (DOM.stageBackgroundPanel) {
             writeBoolean(STAGE_BACKGROUND_PANEL_STORAGE_KEY, DOM.stageBackgroundPanel.open);
@@ -91,6 +106,7 @@ export function createPanelController(deps) {
 
     return {
         handleLive2DPanelToggle,
+        handleRuntimePanelToggle,
         handleSettingsPanelToggle,
         handleStageBackgroundPanelToggle,
         handleStageEffectsPanelToggle,
@@ -98,6 +114,7 @@ export function createPanelController(deps) {
         restoreCronPanelState,
         restoreHeartbeatPanelState,
         restoreLive2DPanelState,
+        restoreRuntimePanelState,
         restoreSettingsPanelState,
         restoreStageBackgroundPanelState,
         restoreStageEffectsPanelState,

@@ -16,7 +16,7 @@ from echobot import (
 )
 from echobot.models import ToolCall
 from echobot.providers.base import LLMProvider
-from echobot.tools import BaseTool, ToolRegistry
+from echobot.tools import BaseTool, RequestUserInputTool, ToolRegistry
 
 
 class EchoTool(BaseTool):
@@ -111,16 +111,48 @@ class ToolThenFailProvider(LLMProvider):
         )
 
 
+class ToolThenAskUserProvider(LLMProvider):
+    async def generate(
+        self,
+        messages,
+        *,
+        tools=None,
+        tool_choice=None,
+        temperature=None,
+        max_tokens=None,
+    ) -> LLMResponse:
+        del messages, tools, tool_choice, temperature, max_tokens
+
+        tool_calls = [
+            ToolCall(
+                id="call_1",
+                name="request_user_input",
+                arguments='{"prompt":"请确认部署环境。","choices":["测试环境","生产环境"]}',
+            )
+        ]
+        return LLMResponse(
+            message=LLMMessage(
+                role="assistant",
+                content="",
+                tool_calls=tool_calls,
+            ),
+            model="fake-model",
+            tool_calls=tool_calls,
+        )
+
+
 def build_runner(
     workspace: Path,
     provider: LLMProvider,
+    *,
+    tool_registry: ToolRegistry | None = None,
 ) -> tuple[SessionAgentRunner, SessionStore, AgentTraceStore]:
     session_store = SessionStore(workspace / "agent_sessions")
     trace_store = AgentTraceStore(workspace / "agent_traces")
     runner = SessionAgentRunner(
         AgentCore(provider),
         session_store,
-        tool_registry_factory=lambda *_args: ToolRegistry([EchoTool()]),
+        tool_registry_factory=lambda *_args: tool_registry or ToolRegistry([EchoTool()]),
         trace_store=trace_store,
     )
     return runner, session_store, trace_store
@@ -204,3 +236,40 @@ class AgentTraceStoreTests(unittest.IsolatedAsyncioTestCase):
 
             saved_session = session_store.load_session("demo")
             self.assertEqual([], saved_session.history)
+
+    async def test_waiting_for_input_run_records_trace_and_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            runner, session_store, _trace_store = build_runner(
+                workspace,
+                ToolThenAskUserProvider(),
+                tool_registry=ToolRegistry([RequestUserInputTool()]),
+            )
+
+            result = await runner.run_prompt("demo", "hello")
+
+            trace_dir = workspace / "agent_traces" / "demo"
+            trace_files = list(trace_dir.glob("*.jsonl"))
+            self.assertEqual(1, len(trace_files))
+
+            records = read_jsonl(trace_files[0])
+            self.assertEqual(
+                [
+                    "turn_started",
+                    "assistant_message",
+                    "tool_result",
+                    "user_input_requested",
+                    "assistant_message",
+                    "turn_completed",
+                ],
+                [str(record["event"]) for record in records],
+            )
+            self.assertEqual("waiting_for_input", records[-1]["status"])
+            self.assertEqual(
+                "请确认部署环境。",
+                records[-1]["pending_user_input"]["prompt"],
+            )
+
+            saved_session = session_store.load_session("demo")
+            self.assertIn("请确认部署环境。", saved_session.history[-1].content)
+            self.assertEqual("waiting_for_input", result.agent_result.status)

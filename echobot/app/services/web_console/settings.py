@@ -16,18 +16,6 @@ class WebRuntimeSettingsService:
     async def load_settings(self) -> RuntimeSettings:
         return await asyncio.to_thread(self._store.load)
 
-    async def save_settings(
-        self,
-        *,
-        delegated_ack_enabled: bool,
-    ) -> dict[str, Any]:
-        settings = await asyncio.to_thread(
-            self._store.update_named_value,
-            "delegated_ack_enabled",
-            bool(delegated_ack_enabled),
-        )
-        return settings.to_dict()
-
     async def save_selected_asr_provider(
         self,
         provider_name: str,

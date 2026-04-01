@@ -160,6 +160,7 @@ async function initializePage() {
     layout.restoreCronPanelState();
     layout.restoreHeartbeatPanelState();
     layout.restoreLive2DPanelState();
+    layout.restoreRuntimePanelState();
     layout.restoreStageBackgroundPanelState();
     layout.restoreStageEffectsPanelState();
     layout.handleSettingsPanelToggle();

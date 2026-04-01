@@ -57,7 +57,7 @@ class WebConsoleService:
         session_name: str,
         role_name: str,
         route_mode: str,
-        delegated_ack_enabled: bool,
+        runtime_config: dict[str, Any],
     ) -> dict[str, Any]:
         live2d = await self._live2d_service.build_config()
         stage = await self._stage_background_service.build_config()
@@ -65,9 +65,7 @@ class WebConsoleService:
             "session_name": session_name,
             "role_name": role_name,
             "route_mode": route_mode,
-            "runtime": {
-                "delegated_ack_enabled": bool(delegated_ack_enabled),
-            },
+            "runtime": dict(runtime_config),
             "live2d": live2d or self._live2d_service.empty_config(),
             "stage": stage,
             "asr": asdict(await self._asr_service.status_snapshot()),
@@ -87,15 +85,6 @@ class WebConsoleService:
 
     async def build_stage_config(self) -> dict[str, Any]:
         return await self._stage_background_service.build_config()
-
-    async def save_runtime_settings(
-        self,
-        *,
-        delegated_ack_enabled: bool,
-    ) -> dict[str, Any]:
-        return await self._runtime_settings_service.save_settings(
-            delegated_ack_enabled=delegated_ack_enabled,
-        )
 
     async def set_selected_asr_provider(self, provider_name: str) -> dict[str, Any]:
         await self._asr_service.set_selected_asr_provider(provider_name)

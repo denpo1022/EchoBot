@@ -58,6 +58,10 @@ export const panelState = {
 
 export const runtimeState = {
     delegatedAckEnabled: true,
+    shellSafetyMode: "danger-full-access",
+    fileWriteEnabled: true,
+    cronMutationEnabled: true,
+    webPrivateNetworkEnabled: false,
     runtimeConfigLoading: false,
 };
 

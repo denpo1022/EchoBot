@@ -203,6 +203,20 @@ class RoleplayEngineTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("Roleplay generation hit max_tokens limit", logs.output[0])
 
+    async def test_present_user_input_request_keeps_roleplay_as_lead_in_only(self) -> None:
+        engine, role_card = self._build_engine(TruncatedProvider("先和你确认一下。"))
+        session = self._session_with_history()
+
+        result = await engine.present_user_input_request(
+            session=session,
+            follow_up_prompt="请确认要修改哪个文件。",
+            choices=["src/app.py", "src/api.py"],
+            why_needed="需要定位修改目标",
+            role_card=role_card,
+        )
+
+        self.assertEqual("先和你确认一下。", result)
+
     def _build_engine(
         self,
         provider: LLMProvider | None = None,

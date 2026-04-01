@@ -19,11 +19,20 @@ def build_default_system_prompt(
     cron_store_path: str | Path | None = None,
     heartbeat_file_path: str | Path | None = None,
     heartbeat_interval_seconds: int | None = None,
+    shell_safety_mode: str = "danger-full-access",
+    file_write_enabled: bool = True,
+    cron_mutation_enabled: bool = True,
+    web_private_network_enabled: bool = False,
 ) -> str:
     workspace_path = Path(workspace).resolve()
     parts = [
         _build_identity_section(workspace_path),
-        _build_operating_rules_section(),
+        _build_operating_rules_section(
+            shell_safety_mode=shell_safety_mode,
+            file_write_enabled=file_write_enabled,
+            cron_mutation_enabled=cron_mutation_enabled,
+            web_private_network_enabled=web_private_network_enabled,
+        ),
     ]
     if enable_project_memory:
         parts.append(
@@ -71,12 +80,33 @@ def _build_identity_section(workspace_path: Path) -> str:
     return "\n".join(lines).strip()
 
 
-def _build_operating_rules_section() -> str:
+def _build_operating_rules_section(
+    *,
+    shell_safety_mode: str,
+    file_write_enabled: bool,
+    cron_mutation_enabled: bool,
+    web_private_network_enabled: bool,
+) -> str:
     lines = [
         "## Core Rules",
         "- Use tools, memory, and workspace inspection to get real answers. Do not guess when the answer depends on external state.",
         "- Do not invent file contents, code changes, command output, schedule state, or prior memory.",
         "- If a request depends on project files, code, schedules, or stored memory, inspect them before answering.",
+        "- For multi-step work, use `update_plan` to keep a short plan current.",
+        "- If you are blocked by missing requirements or ambiguity, use `request_user_input` instead of guessing.",
+        f"- Current shell safety mode: `{shell_safety_mode}`.",
+        (
+            "- In `read-only` and `workspace-write` shell modes, "
+            "`run_shell_command` only accepts simple allowlisted commands."
+        ),
+        f"- Workspace file writes are currently {'enabled' if file_write_enabled else 'disabled'}.",
+        f"- Cron mutations are currently {'enabled' if cron_mutation_enabled else 'disabled'}.",
+        (
+            "- Private-network web access is currently enabled for `fetch_web_page`."
+            if web_private_network_enabled
+            else "- `fetch_web_page` can only access public web hosts; localhost and private IPs are blocked."
+        ),
+        "- If a tool is blocked by runtime safety settings, explain that clearly instead of pretending it worked.",
         "- When a tool or file gives the answer, base your response on that evidence instead of paraphrasing loosely from memory.",
         "- Preserve exact technical details when they matter: paths, commands, code, JSON, identifiers, timestamps, and error messages.",
         "- Keep responses concise, but do not omit critical caveats, failure details, or uncertainty.",

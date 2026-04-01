@@ -28,7 +28,12 @@ from echobot.orchestration import (
 )
 from echobot.providers.base import LLMProvider
 from echobot.runtime.bootstrap import RuntimeContext, RuntimeOptions
-from echobot.runtime.settings import RuntimeSettingsStore
+from echobot.runtime.settings import (
+    DEFAULT_SHELL_SAFETY_MODE,
+    RuntimeConfigSnapshot,
+    RuntimeControls,
+    RuntimeSettingsStore,
+)
 from echobot.runtime.session_runner import SessionAgentRunner
 from echobot.runtime.sessions import SessionStore
 from echobot.scheduling.cron import (
@@ -380,6 +385,8 @@ def build_test_context(options: RuntimeOptions) -> RuntimeContext:
         heartbeat_file_path=workspace / ".echobot" / "HEARTBEAT.md",
         heartbeat_interval_seconds=60,
         tool_registry_factory=lambda *_args: None,
+        runtime_controls=_runtime_controls(options),
+        default_runtime_config=_default_runtime_config(options),
     )
 
 
@@ -429,6 +436,8 @@ def build_slow_agent_test_context(options: RuntimeOptions) -> RuntimeContext:
         heartbeat_file_path=workspace / ".echobot" / "HEARTBEAT.md",
         heartbeat_interval_seconds=60,
         tool_registry_factory=lambda *_args: None,
+        runtime_controls=_runtime_controls(options),
+        default_runtime_config=_default_runtime_config(options),
     )
 
 
@@ -478,6 +487,8 @@ def build_slow_ack_test_context(options: RuntimeOptions) -> RuntimeContext:
         heartbeat_file_path=workspace / ".echobot" / "HEARTBEAT.md",
         heartbeat_interval_seconds=60,
         tool_registry_factory=lambda *_args: None,
+        runtime_controls=_runtime_controls(options),
+        default_runtime_config=_default_runtime_config(options),
     )
 
 
@@ -504,6 +515,46 @@ def _delegated_ack_enabled(options: RuntimeOptions) -> bool:
         )
         return store.load().delegated_ack_enabled is not False
     return bool(options.delegated_ack_enabled)
+
+
+def _runtime_controls(options: RuntimeOptions) -> RuntimeControls:
+    store = RuntimeSettingsStore(
+        (options.workspace or Path(".")).resolve()
+        / ".echobot"
+        / "runtime_settings.json",
+    )
+    settings = store.load()
+    shell_safety_mode = settings.shell_safety_mode or DEFAULT_SHELL_SAFETY_MODE
+    return RuntimeControls(
+        shell_safety_mode=shell_safety_mode,
+        file_write_enabled=(
+            True if settings.file_write_enabled is None else settings.file_write_enabled
+        ),
+        cron_mutation_enabled=(
+            True
+            if settings.cron_mutation_enabled is None
+            else settings.cron_mutation_enabled
+        ),
+        web_private_network_enabled=(
+            False
+            if settings.web_private_network_enabled is None
+            else settings.web_private_network_enabled
+        ),
+    )
+
+
+def _default_runtime_config(options: RuntimeOptions) -> RuntimeConfigSnapshot:
+    return RuntimeConfigSnapshot(
+        delegated_ack_enabled=(
+            True
+            if options.delegated_ack_enabled is None
+            else bool(options.delegated_ack_enabled)
+        ),
+        shell_safety_mode=DEFAULT_SHELL_SAFETY_MODE,
+        file_write_enabled=True,
+        cron_mutation_enabled=True,
+        web_private_network_enabled=False,
+    )
 
 
 def write_test_live2d_model(workspace: Path) -> None:
@@ -1820,6 +1871,94 @@ class AppApiTests(unittest.TestCase):
             self.assertIn("working", history_contents)
             self.assertIn("后台任务已停止。", history_contents)
 
+    def test_chat_job_list_endpoint_returns_latest_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            app = create_app(
+                runtime_options=RuntimeOptions(
+                    workspace=workspace,
+                    no_tools=True,
+                    no_skills=True,
+                    no_memory=True,
+                    no_heartbeat=True,
+                ),
+                channel_config_path=workspace / ".echobot" / "channels.json",
+                context_builder=build_test_context,
+            )
+
+            with TestClient(app) as client:
+                first = client.post(
+                    "/api/chat",
+                    json={
+                        "session_name": "demo",
+                        "prompt": "Please set a cron reminder",
+                    },
+                )
+                second = client.post(
+                    "/api/chat",
+                    json={
+                        "session_name": "demo",
+                        "prompt": "Please set a cron reminder",
+                    },
+                )
+                jobs = client.get("/api/chat/jobs?session_name=demo&limit=10")
+
+            self.assertEqual(200, first.status_code)
+            self.assertEqual(200, second.status_code)
+            self.assertEqual(200, jobs.status_code)
+            payload = jobs.json()
+            self.assertEqual(2, len(payload["jobs"]))
+            self.assertEqual("demo", payload["jobs"][0]["session_name"])
+            self.assertIn("prompt", payload["jobs"][0])
+            self.assertIn("attempt", payload["jobs"][0])
+            self.assertIn("started_at", payload["jobs"][0])
+
+    def test_chat_job_retry_endpoint_starts_new_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            app = create_app(
+                runtime_options=RuntimeOptions(
+                    workspace=workspace,
+                    no_tools=True,
+                    no_skills=True,
+                    no_memory=True,
+                    no_heartbeat=True,
+                ),
+                channel_config_path=workspace / ".echobot" / "channels.json",
+                context_builder=build_slow_agent_test_context,
+            )
+
+            with TestClient(app) as client:
+                replied = client.post(
+                    "/api/chat",
+                    json={
+                        "session_name": "demo",
+                        "prompt": "Please set a cron reminder",
+                    },
+                )
+                original_job_id = replied.json()["job_id"]
+                cancelled = client.post(f"/api/chat/jobs/{original_job_id}/cancel")
+                retried = client.post(f"/api/chat/jobs/{original_job_id}/retry")
+
+                self.assertEqual(200, cancelled.status_code)
+                self.assertEqual(200, retried.status_code)
+                self.assertNotEqual(original_job_id, retried.json()["job_id"])
+                self.assertEqual("running", retried.json()["status"])
+
+                retried_job_id = retried.json()["job_id"]
+                final = None
+                for _ in range(300):
+                    final = client.get(f"/api/chat/jobs/{retried_job_id}")
+                    if final.json()["status"] != "running":
+                        break
+                    time.sleep(0.01)
+
+            assert final is not None
+            self.assertEqual(200, final.status_code)
+            self.assertEqual("completed", final.json()["status"])
+            self.assertEqual(2, final.json()["attempt"])
+            self.assertEqual(original_job_id, final.json()["retry_of_job_id"])
+
     def test_chat_job_trace_endpoint_returns_recorded_trace_events(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
@@ -2143,7 +2282,13 @@ class AppApiTests(unittest.TestCase):
                 self.assertIn('id="tts-provider-select"', page.text)
                 self.assertIn('id="asr-provider-select"', page.text)
                 self.assertIn('id="route-mode-select"', page.text)
+                self.assertIn('id="runtime-panel"', page.text)
+                self.assertIn('id="runtime-reset-button"', page.text)
                 self.assertIn('id="delegated-ack-checkbox"', page.text)
+                self.assertIn('id="shell-safety-mode-select"', page.text)
+                self.assertIn('id="file-write-enabled-checkbox"', page.text)
+                self.assertIn('id="cron-mutation-enabled-checkbox"', page.text)
+                self.assertIn('id="web-private-network-enabled-checkbox"', page.text)
                 self.assertIn('id="heartbeat-panel"', page.text)
                 self.assertIn('id="heartbeat-input"', page.text)
                 self.assertIn('id="heartbeat-save-button"', page.text)
@@ -2179,6 +2324,13 @@ class AppApiTests(unittest.TestCase):
                 self.assertEqual("default", payload["session_name"])
                 self.assertEqual("auto", payload["route_mode"])
                 self.assertTrue(payload["runtime"]["delegated_ack_enabled"])
+                self.assertEqual(
+                    "danger-full-access",
+                    payload["runtime"]["shell_safety_mode"],
+                )
+                self.assertTrue(payload["runtime"]["file_write_enabled"])
+                self.assertTrue(payload["runtime"]["cron_mutation_enabled"])
+                self.assertFalse(payload["runtime"]["web_private_network_enabled"])
                 self.assertEqual("default", payload["stage"]["default_background_key"])
                 self.assertEqual("default", payload["stage"]["backgrounds"][0]["key"])
                 self.assertEqual("不使用背景", payload["stage"]["backgrounds"][0]["label"])
@@ -2243,6 +2395,10 @@ class AppApiTests(unittest.TestCase):
                 json.dumps(
                     {
                         "delegated_ack_enabled": True,
+                        "shell_safety_mode": "danger-full-access",
+                        "file_write_enabled": True,
+                        "cron_mutation_enabled": True,
+                        "web_private_network_enabled": False,
                         "future_setting": "keep-me",
                     },
                     ensure_ascii=False,
@@ -2269,20 +2425,36 @@ class AppApiTests(unittest.TestCase):
                     "/api/web/runtime",
                     json={
                         "delegated_ack_enabled": False,
+                        "shell_safety_mode": "read-only",
+                        "file_write_enabled": False,
+                        "cron_mutation_enabled": False,
+                        "web_private_network_enabled": True,
                     },
                 )
                 config = client.get("/api/web/config")
 
             self.assertEqual(200, updated.status_code)
             self.assertFalse(updated.json()["delegated_ack_enabled"])
+            self.assertEqual("read-only", updated.json()["shell_safety_mode"])
+            self.assertFalse(updated.json()["file_write_enabled"])
+            self.assertFalse(updated.json()["cron_mutation_enabled"])
+            self.assertTrue(updated.json()["web_private_network_enabled"])
             self.assertEqual(200, config.status_code)
             self.assertFalse(config.json()["runtime"]["delegated_ack_enabled"])
+            self.assertEqual("read-only", config.json()["runtime"]["shell_safety_mode"])
+            self.assertFalse(config.json()["runtime"]["file_write_enabled"])
+            self.assertFalse(config.json()["runtime"]["cron_mutation_enabled"])
+            self.assertTrue(config.json()["runtime"]["web_private_network_enabled"])
 
             self.assertTrue(settings_path.exists())
             settings_payload = json.loads(settings_path.read_text(encoding="utf-8"))
             self.assertEqual(
                 {
                     "delegated_ack_enabled": False,
+                    "shell_safety_mode": "read-only",
+                    "file_write_enabled": False,
+                    "cron_mutation_enabled": False,
+                    "web_private_network_enabled": True,
                     "future_setting": "keep-me",
                 },
                 settings_payload,
@@ -2307,6 +2479,169 @@ class AppApiTests(unittest.TestCase):
 
             self.assertEqual(200, restarted_config.status_code)
             self.assertFalse(restarted_config.json()["runtime"]["delegated_ack_enabled"])
+            self.assertEqual(
+                "read-only",
+                restarted_config.json()["runtime"]["shell_safety_mode"],
+            )
+            self.assertFalse(restarted_config.json()["runtime"]["file_write_enabled"])
+            self.assertFalse(restarted_config.json()["runtime"]["cron_mutation_enabled"])
+            self.assertTrue(restarted_config.json()["runtime"]["web_private_network_enabled"])
+
+    def test_web_console_runtime_patch_updates_only_requested_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            settings_path = workspace / ".echobot" / "runtime_settings.json"
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "delegated_ack_enabled": False,
+                        "shell_safety_mode": "read-only",
+                        "file_write_enabled": True,
+                        "cron_mutation_enabled": False,
+                        "web_private_network_enabled": True,
+                        "future_setting": "keep-me",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            app = create_app(
+                runtime_options=RuntimeOptions(
+                    workspace=workspace,
+                    no_tools=True,
+                    no_skills=True,
+                    no_memory=True,
+                    no_heartbeat=True,
+                ),
+                channel_config_path=workspace / ".echobot" / "channels.json",
+                context_builder=build_test_context,
+                tts_service_builder=build_test_tts_service,
+                asr_service_builder=build_test_asr_service,
+            )
+
+            with TestClient(app) as client:
+                updated = client.patch(
+                    "/api/web/runtime",
+                    json={"file_write_enabled": False},
+                )
+                config = client.get("/api/web/config")
+
+            self.assertEqual(200, updated.status_code)
+            self.assertFalse(updated.json()["delegated_ack_enabled"])
+            self.assertEqual("read-only", updated.json()["shell_safety_mode"])
+            self.assertFalse(updated.json()["file_write_enabled"])
+            self.assertFalse(updated.json()["cron_mutation_enabled"])
+            self.assertTrue(updated.json()["web_private_network_enabled"])
+
+            self.assertEqual(200, config.status_code)
+            self.assertFalse(config.json()["runtime"]["delegated_ack_enabled"])
+            self.assertEqual("read-only", config.json()["runtime"]["shell_safety_mode"])
+            self.assertFalse(config.json()["runtime"]["file_write_enabled"])
+            self.assertFalse(config.json()["runtime"]["cron_mutation_enabled"])
+            self.assertTrue(config.json()["runtime"]["web_private_network_enabled"])
+
+            settings_payload = json.loads(settings_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                {
+                    "delegated_ack_enabled": False,
+                    "shell_safety_mode": "read-only",
+                    "file_write_enabled": False,
+                    "cron_mutation_enabled": False,
+                    "web_private_network_enabled": True,
+                    "future_setting": "keep-me",
+                },
+                settings_payload,
+            )
+
+    def test_web_console_runtime_reset_clears_overrides_and_restores_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            settings_path = workspace / ".echobot" / "runtime_settings.json"
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "delegated_ack_enabled": True,
+                        "shell_safety_mode": "read-only",
+                        "file_write_enabled": False,
+                        "cron_mutation_enabled": False,
+                        "web_private_network_enabled": True,
+                        "future_setting": "keep-me",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            runtime_options = RuntimeOptions(
+                workspace=workspace,
+                delegated_ack_enabled=False,
+                no_tools=True,
+                no_skills=True,
+                no_memory=True,
+                no_heartbeat=True,
+            )
+            app = create_app(
+                runtime_options=runtime_options,
+                channel_config_path=workspace / ".echobot" / "channels.json",
+                context_builder=build_test_context,
+                tts_service_builder=build_test_tts_service,
+                asr_service_builder=build_test_asr_service,
+            )
+
+            with TestClient(app) as client:
+                reset = client.post("/api/web/runtime/reset")
+                config = client.get("/api/web/config")
+
+            self.assertEqual(200, reset.status_code)
+            self.assertFalse(reset.json()["delegated_ack_enabled"])
+            self.assertEqual("danger-full-access", reset.json()["shell_safety_mode"])
+            self.assertTrue(reset.json()["file_write_enabled"])
+            self.assertTrue(reset.json()["cron_mutation_enabled"])
+            self.assertFalse(reset.json()["web_private_network_enabled"])
+
+            self.assertEqual(200, config.status_code)
+            self.assertFalse(config.json()["runtime"]["delegated_ack_enabled"])
+            self.assertEqual(
+                "danger-full-access",
+                config.json()["runtime"]["shell_safety_mode"],
+            )
+            self.assertTrue(config.json()["runtime"]["file_write_enabled"])
+            self.assertTrue(config.json()["runtime"]["cron_mutation_enabled"])
+            self.assertFalse(config.json()["runtime"]["web_private_network_enabled"])
+
+            settings_payload = json.loads(settings_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                {
+                    "future_setting": "keep-me",
+                },
+                settings_payload,
+            )
+
+            restarted_app = create_app(
+                runtime_options=runtime_options,
+                channel_config_path=workspace / ".echobot" / "channels.json",
+                context_builder=build_test_context,
+                tts_service_builder=build_test_tts_service,
+                asr_service_builder=build_test_asr_service,
+            )
+
+            with TestClient(restarted_app) as client:
+                restarted_config = client.get("/api/web/config")
+
+            self.assertEqual(200, restarted_config.status_code)
+            self.assertFalse(restarted_config.json()["runtime"]["delegated_ack_enabled"])
+            self.assertEqual(
+                "danger-full-access",
+                restarted_config.json()["runtime"]["shell_safety_mode"],
+            )
+            self.assertTrue(restarted_config.json()["runtime"]["file_write_enabled"])
+            self.assertTrue(restarted_config.json()["runtime"]["cron_mutation_enabled"])
+            self.assertFalse(
+                restarted_config.json()["runtime"]["web_private_network_enabled"]
+            )
 
     def test_web_console_asr_provider_switch_updates_config_and_persists(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -85,6 +85,13 @@ _SCHEDULED_NOTIFICATION_PRESENTATION_INSTRUCTION = (
     "Do not invent a different task or time."
 )
 
+_USER_INPUT_REQUEST_PRESENTATION_INSTRUCTION = (
+    "The full agent needs one follow-up answer before it can continue. "
+    "Reply with one short in-character lead-in sentence only. "
+    "Do not restate the follow-up question, do not rewrite any answer choices, and do not add extra questions. "
+    "The exact follow-up request will be appended after your sentence."
+)
+
 
 @dataclass(slots=True)
 class ScheduledCronJobInfo:
@@ -306,6 +313,38 @@ class RoleplayEngine:
                 _AGENT_FAILURE_PRESENTATION_INSTRUCTION,
             ],
             fallback_text=f"The task failed: {error_text}",
+            max_tokens=self._lightweight_max_tokens,
+        )
+
+    async def present_user_input_request(
+        self,
+        *,
+        session: ChatSession,
+        follow_up_prompt: str,
+        choices: list[str] | None = None,
+        why_needed: str = "",
+        role_card: RoleCard,
+    ) -> str:
+        choice_lines = "\n".join(f"- {choice}" for choice in choices or [] if choice.strip())
+        request_text = (
+            "The full agent needs one follow-up answer before continuing.\n\n"
+            f"Follow-up request:\n{follow_up_prompt.strip()}"
+        )
+        if choice_lines:
+            request_text += f"\n\nSuggested choices:\n{choice_lines}"
+        if why_needed.strip():
+            request_text += f"\n\nWhy needed:\n{why_needed.strip()}"
+
+        return await self._generate(
+            session=session,
+            user_input=request_text,
+            image_urls=None,
+            file_attachments=None,
+            role_card=role_card,
+            extra_system_messages=[
+                _USER_INPUT_REQUEST_PRESENTATION_INSTRUCTION,
+            ],
+            fallback_text="",
             max_tokens=self._lightweight_max_tokens,
         )
 

@@ -274,6 +274,43 @@ class FakeUserFileToolProvider(LLMProvider):
         )
 
 
+class FakeUserInputToolProvider(LLMProvider):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate(
+        self,
+        messages,
+        *,
+        tools=None,
+        tool_choice=None,
+        temperature=None,
+        max_tokens=None,
+    ) -> LLMResponse:
+        del messages, tools, tool_choice, temperature, max_tokens
+        self.calls += 1
+        tool_calls = [
+            ToolCall(
+                id="call_user_input",
+                name="request_user_input",
+                arguments=(
+                    '{"prompt":"请确认要修改哪个文件。",'
+                    '"choices":["修改 src/app.py","修改 src/api.py"]}'
+                ),
+            )
+        ]
+        return LLMResponse(
+            message=LLMMessage(
+                role="assistant",
+                content="",
+                tool_calls=tool_calls,
+            ),
+            model="fake-model",
+            finish_reason="tool_calls",
+            tool_calls=tool_calls,
+        )
+
+
 class MaxStepsRecordingAgent(AgentCore):
     def __init__(self) -> None:
         super().__init__(FakeProvider())
@@ -519,6 +556,26 @@ class AgentCoreTests(unittest.IsolatedAsyncioTestCase):
             "report.txt",
             result.outbound_content_blocks[0]["file_attachment"]["name"],
         )
+
+    async def test_request_user_input_stops_tool_loop_and_sets_waiting_status(self) -> None:
+        from echobot.tools import RequestUserInputTool
+
+        provider = FakeUserInputToolProvider()
+        agent = AgentCore(provider)
+        registry = ToolRegistry([RequestUserInputTool()])
+
+        result = await agent.ask_with_tools(
+            "帮我继续改代码",
+            tool_registry=registry,
+        )
+
+        self.assertEqual(1, provider.calls)
+        self.assertEqual("waiting_for_input", result.status)
+        self.assertEqual(
+            "请确认要修改哪个文件。",
+            result.pending_user_input["prompt"],
+        )
+        self.assertIn("请确认要修改哪个文件。", result.response.message.content)
 
 
 class RunAgentTurnTests(unittest.IsolatedAsyncioTestCase):

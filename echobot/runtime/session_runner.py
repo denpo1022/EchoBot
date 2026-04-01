@@ -92,7 +92,8 @@ class SessionAgentRunner:
             )
             tool_registry = None
             if self._tool_registry_factory is not None:
-                tool_registry = self._tool_registry_factory(
+                tool_registry = await asyncio.to_thread(
+                    self._tool_registry_factory,
                     session.name,
                     scheduled_context,
                 )
@@ -164,10 +165,12 @@ class SessionAgentRunner:
                     "turn_completed",
                     {
                         "steps": result.steps,
+                        "status": result.status,
                         "history_length": len(session.history),
                         "final_message": _message_to_trace_dict(result.response.message),
                         "usage": result.response.usage.to_dict(),
                         "compressed_summary": session.compressed_summary,
+                        "pending_user_input": result.pending_user_input,
                     },
                 )
             return SessionRunResult(

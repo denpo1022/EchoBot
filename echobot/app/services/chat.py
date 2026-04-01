@@ -106,6 +106,19 @@ class ChatService:
     async def get_job(self, job_id: str) -> ConversationJob | None:
         return await self._coordinator.get_job(job_id)
 
+    async def list_jobs(
+        self,
+        *,
+        session_name: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[ConversationJob]:
+        return await self._coordinator.list_jobs(
+            session_name=session_name,
+            status=status,
+            limit=limit,
+        )
+
     async def get_job_trace(
         self,
         job_id: str,
@@ -114,3 +127,8 @@ class ChatService:
 
     async def cancel_job(self, job_id: str) -> ConversationJob | None:
         return await self._coordinator.cancel_job(job_id)
+
+    async def retry_job(self, job_id: str) -> OrchestratedTurnResult:
+        result = await self._coordinator.retry_job(job_id)
+        await self._session_service.set_current_session(result.session.name)
+        return result

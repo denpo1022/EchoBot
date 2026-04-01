@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 from ..models import (
@@ -26,6 +27,7 @@ from .jobs import (
     ConversationJob,
     ConversationJobStore,
     OrchestratedTurnResult,
+    job_can_retry,
 )
 from .roleplay import RoleplayEngine, ScheduledCronJobInfo, StreamCallback
 from .route_modes import (
@@ -40,6 +42,7 @@ BackgroundJobFactory = Callable[[], Awaitable[None]]
 AGENT_HANDOFF_MAX_MESSAGES = 6
 AGENT_HANDOFF_MAX_TOTAL_CHARS = 6000
 AGENT_HANDOFF_MAX_MESSAGE_CHARS = 1800
+PENDING_USER_INPUT_METADATA_KEY = "pending_user_input"
 
 
 class ConversationCoordinator:
@@ -52,6 +55,7 @@ class ConversationCoordinator:
         roleplay_engine: RoleplayEngine,
         role_registry: RoleCardRegistry,
         delegated_ack_enabled: bool = True,
+        job_store: ConversationJobStore | None = None,
     ) -> None:
         self._session_store = session_store
         self._agent_runner = agent_runner
@@ -59,7 +63,7 @@ class ConversationCoordinator:
         self._roleplay_engine = roleplay_engine
         self._role_registry = role_registry
         self._delegated_ack_enabled = delegated_ack_enabled
-        self._jobs = ConversationJobStore()
+        self._jobs = job_store or ConversationJobStore()
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._session_locks_guard = asyncio.Lock()
         self._background_tasks: set[asyncio.Task[None]] = set()
@@ -84,6 +88,8 @@ class ConversationCoordinator:
         role_name: str | None = None,
         route_mode: RouteMode | None = None,
         completion_callback: CompletionCallback | None = None,
+        retry_of_job_id: str | None = None,
+        attempt: int = 1,
     ) -> OrchestratedTurnResult:
         return await self.handle_user_turn_stream(
             session_name,
@@ -93,6 +99,8 @@ class ConversationCoordinator:
             role_name=role_name,
             route_mode=route_mode,
             completion_callback=completion_callback,
+            retry_of_job_id=retry_of_job_id,
+            attempt=attempt,
         )
 
     async def handle_user_turn_stream(
@@ -106,6 +114,8 @@ class ConversationCoordinator:
         route_mode: RouteMode | None = None,
         completion_callback: CompletionCallback | None = None,
         on_chunk: StreamCallback | None = None,
+        retry_of_job_id: str | None = None,
+        attempt: int = 1,
     ) -> OrchestratedTurnResult:
         await self.restore_session(session_name)
         chunk_handler = on_chunk or _discard_stream_chunk
@@ -117,12 +127,15 @@ class ConversationCoordinator:
             )
             role_card = self._resolve_turn_role(session, role_name)
             resolved_route_mode = self._resolve_turn_route_mode(session, route_mode)
-
-            decision = await self._decision_engine.decide(
-                prompt,
-                history=list(session.history[-8:]),
-                route_mode=resolved_route_mode,
-            )
+            pending_user_input = _pending_user_input_from_metadata(session.metadata)
+            if pending_user_input is None:
+                decision = await self._decision_engine.decide(
+                    prompt,
+                    history=list(session.history[-8:]),
+                    route_mode=resolved_route_mode,
+                )
+            else:
+                decision = _forced_agent_decision_for_pending_input()
 
             if not decision.requires_agent:
                 response_text = await self._roleplay_engine.stream_chat_reply(
@@ -159,7 +172,7 @@ class ConversationCoordinator:
                 )
 
             immediate_response = ""
-            if self._delegated_ack_enabled:
+            if self._delegated_ack_enabled and pending_user_input is None:
                 immediate_response = await self._roleplay_engine.delegated_ack(
                     session=session,
                     user_input=prompt,
@@ -169,6 +182,9 @@ class ConversationCoordinator:
                 )
             handoff_text = _build_agent_handoff_text(
                 session=session,
+            )
+            continuation_text = _build_pending_user_input_continuation_text(
+                pending_user_input,
             )
             session.history.append(
                 LLMMessage(
@@ -184,6 +200,8 @@ class ConversationCoordinator:
                 session.history.append(
                     LLMMessage(role="assistant", content=immediate_response)
                 )
+            if pending_user_input is not None:
+                session.metadata = _clear_pending_user_input(session.metadata)
             await asyncio.to_thread(self._session_store.save_session, session)
             create_trace_run_id = getattr(self._agent_runner, "create_trace_run_id", None)
             trace_run_id = (
@@ -196,7 +214,12 @@ class ConversationCoordinator:
                 prompt=prompt,
                 immediate_response=immediate_response,
                 role_name=role_card.name,
+                route_mode=resolved_route_mode,
+                image_urls=image_urls or [],
+                file_attachments=file_attachments or [],
                 trace_run_id=trace_run_id,
+                attempt=attempt,
+                retry_of_job_id=retry_of_job_id,
             )
             self._start_background_job(
                 job.job_id,
@@ -207,6 +230,7 @@ class ConversationCoordinator:
                     image_urls=image_urls,
                     file_attachments=file_attachments,
                     handoff_text=handoff_text,
+                    continuation_text=continuation_text,
                     trace_run_id=trace_run_id,
                     completion_callback=completion_callback,
                 ),
@@ -294,6 +318,48 @@ class ConversationCoordinator:
 
     async def get_job(self, job_id: str) -> ConversationJob | None:
         return await self._jobs.get(job_id)
+
+    async def list_jobs(
+        self,
+        *,
+        session_name: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[ConversationJob]:
+        return await self._jobs.list_jobs(
+            session_name=session_name,
+            status=status,
+            limit=limit,
+        )
+
+    async def retry_job(
+        self,
+        job_id: str,
+        *,
+        completion_callback: CompletionCallback | None = None,
+    ) -> OrchestratedTurnResult:
+        job = await self._jobs.get(job_id)
+        if job is None:
+            raise ValueError(f"任务不存在：{job_id}")
+        if not job_can_retry(job):
+            raise ValueError("只有失败或已取消的任务可以重试")
+
+        route_mode = (
+            job.route_mode
+            if job.route_mode in {"auto", "chat_only", "force_agent"}
+            else None
+        )
+        return await self.handle_user_turn(
+            job.session_name,
+            job.prompt,
+            image_urls=job.image_urls,
+            file_attachments=job.file_attachments,
+            role_name=job.role_name,
+            route_mode=route_mode,
+            completion_callback=completion_callback,
+            retry_of_job_id=job.job_id,
+            attempt=job.attempt + 1,
+        )
 
     async def get_job_trace(
         self,
@@ -407,6 +473,7 @@ class ConversationCoordinator:
         image_urls: list[ImageInput] | None,
         file_attachments: list[FileInput] | None,
         handoff_text: str | None,
+        continuation_text: str | None,
         trace_run_id: str | None,
         completion_callback: CompletionCallback | None,
     ) -> None:
@@ -415,9 +482,12 @@ class ConversationCoordinator:
             run_prompt_kwargs: dict[str, Any] = {
                 "scheduled_context": False,
                 "transient_system_messages": (
-                    [handoff_text]
-                    if handoff_text and handoff_text.strip()
-                    else None
+                    [
+                        message
+                        for message in [continuation_text, handoff_text]
+                        if message and message.strip()
+                    ]
+                    or None
                 ),
                 "image_urls": image_urls,
                 "file_attachments": file_attachments,
@@ -435,6 +505,7 @@ class ConversationCoordinator:
             outbound_content_blocks = list(
                 execution.agent_result.outbound_content_blocks or []
             )
+            awaiting_user_input = execution.agent_result.status == "waiting_for_input"
             scheduled_job = _extract_scheduled_cron_job(
                 execution.agent_result.new_messages,
             )
@@ -447,13 +518,29 @@ class ConversationCoordinator:
                 is_error=False,
                 scheduled_job=scheduled_job,
                 outbound_content_blocks=outbound_content_blocks,
+                bypass_roleplay=awaiting_user_input,
+                direct_response_content=(
+                    execution.agent_result.response.message.content
+                    if awaiting_user_input
+                    else ""
+                ),
+                pending_user_input=execution.agent_result.pending_user_input,
             )
-            job = await self._jobs.set_completed(
-                job_id,
-                final_response=final_text,
-                final_response_content=final_content,
-                steps=execution.agent_result.steps,
-            )
+            if awaiting_user_input:
+                job = await self._jobs.set_waiting_for_input(
+                    job_id,
+                    final_response=final_text,
+                    final_response_content=final_content,
+                    steps=execution.agent_result.steps,
+                    pending_user_input=execution.agent_result.pending_user_input,
+                )
+            else:
+                job = await self._jobs.set_completed(
+                    job_id,
+                    final_response=final_text,
+                    final_response_content=final_content,
+                    steps=execution.agent_result.steps,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -490,10 +577,19 @@ class ConversationCoordinator:
                 status=job.status,
                 created_at=job.created_at,
                 updated_at=job.updated_at,
+                started_at=job.started_at,
+                finished_at=job.finished_at,
+                trace_run_id=job.trace_run_id,
+                route_mode=job.route_mode,
+                attempt=job.attempt,
+                retry_of_job_id=job.retry_of_job_id,
+                image_urls=job.image_urls,
+                file_attachments=job.file_attachments,
                 final_response=job.final_response,
                 final_response_content=job.final_response_content,
                 error=job.error,
                 steps=job.steps,
+                pending_user_input=job.pending_user_input,
             )
         )
 
@@ -508,6 +604,9 @@ class ConversationCoordinator:
         is_error: bool,
         scheduled_job: ScheduledCronJobInfo | None = None,
         outbound_content_blocks: list[dict[str, Any]] | None = None,
+        bypass_roleplay: bool = False,
+        direct_response_content: MessageContent = "",
+        pending_user_input: dict[str, Any] | None = None,
     ) -> tuple[str, MessageContent, str]:
         lock = await self._session_lock(session_name)
         async with lock:
@@ -519,7 +618,34 @@ class ConversationCoordinator:
                 session_name,
             )
             role_card = self._resolve_session_role(session)
-            if raw_content.strip():
+            metadata_changed = False
+            normalized_pending_user_input = _normalize_pending_user_input(
+                pending_user_input
+            )
+            if normalized_pending_user_input is not None:
+                session.metadata = _set_pending_user_input(
+                    session.metadata,
+                    normalized_pending_user_input,
+                )
+                metadata_changed = True
+            if bypass_roleplay:
+                lead_in_text = ""
+                if normalized_pending_user_input is not None:
+                    lead_in_text = await self._roleplay_engine.present_user_input_request(
+                        session=session,
+                        follow_up_prompt=normalized_pending_user_input["prompt"],
+                        choices=list(normalized_pending_user_input.get("choices") or []),
+                        why_needed=str(
+                            normalized_pending_user_input.get("why_needed", "")
+                        ),
+                        role_card=role_card,
+                    )
+                final_content = _build_visible_response_content(
+                    text=lead_in_text,
+                    base_content=direct_response_content,
+                    outbound_content_blocks=outbound_content_blocks,
+                )
+            elif raw_content.strip():
                 if is_error:
                     final_text = await self._roleplay_engine.present_agent_failure(
                         session=session,
@@ -553,14 +679,18 @@ class ConversationCoordinator:
             else:
                 final_text = ""
 
-            final_content = _build_visible_response_content(
-                final_text,
-                outbound_content_blocks=outbound_content_blocks,
-            )
+            if not bypass_roleplay:
+                final_content = _build_visible_response_content(
+                    final_text,
+                    outbound_content_blocks=outbound_content_blocks,
+                )
+            appended_message = False
             if not is_message_content_empty(final_content):
                 session.history.append(
                     LLMMessage(role="assistant", content=final_content)
                 )
+                appended_message = True
+            if appended_message or metadata_changed:
                 await asyncio.to_thread(self._session_store.save_session, session)
             return (
                 message_content_to_text(final_content).strip(),
@@ -761,8 +891,9 @@ def _optional_text(value: object) -> str | None:
 
 
 def _build_visible_response_content(
-    text: str,
+    text: str = "",
     *,
+    base_content: MessageContent = "",
     outbound_content_blocks: list[dict[str, Any]] | None = None,
 ) -> MessageContent:
     blocks: list[dict[str, Any]] = []
@@ -774,12 +905,21 @@ def _build_visible_response_content(
                 "text": cleaned_text,
             }
         )
+    blocks.extend(message_content_blocks(base_content))
     blocks.extend(message_content_blocks(outbound_content_blocks or []))
     if not blocks:
         return ""
     if len(blocks) == 1 and blocks[0].get("type") == TEXT_CONTENT_BLOCK_TYPE:
         return str(blocks[0].get("text", ""))
     return blocks
+
+
+def _forced_agent_decision_for_pending_input():
+    return SimpleNamespace(
+        requires_agent=True,
+        route="agent",
+        reason="Continue paused task after request_user_input",
+    )
 
 
 def _build_agent_handoff_text(
@@ -807,6 +947,87 @@ def _build_agent_handoff_text(
         lines.append(entry.content)
         lines.append("</visible_message>")
         lines.append("")
+    return "\n".join(lines).strip()
+
+
+def _normalize_pending_user_input(
+    value: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+
+    prompt = str(value.get("prompt", "")).strip()
+    if not prompt:
+        return None
+
+    raw_choices = value.get("choices", [])
+    if isinstance(raw_choices, list):
+        choices = [str(choice).strip() for choice in raw_choices if str(choice).strip()]
+    else:
+        choices = []
+
+    why_needed = str(value.get("why_needed", "")).strip()
+    normalized = {
+        "prompt": prompt,
+        "choices": choices,
+        "why_needed": why_needed,
+    }
+    return normalized
+
+
+def _pending_user_input_from_metadata(
+    metadata: dict[str, object] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(metadata, dict):
+        return None
+    value = metadata.get(PENDING_USER_INPUT_METADATA_KEY)
+    if not isinstance(value, dict):
+        return None
+    return _normalize_pending_user_input(dict(value))
+
+
+def _set_pending_user_input(
+    metadata: dict[str, object],
+    pending_user_input: dict[str, Any],
+) -> dict[str, object]:
+    next_metadata = dict(metadata or {})
+    next_metadata[PENDING_USER_INPUT_METADATA_KEY] = dict(pending_user_input)
+    return next_metadata
+
+
+def _clear_pending_user_input(
+    metadata: dict[str, object],
+) -> dict[str, object]:
+    next_metadata = dict(metadata or {})
+    next_metadata.pop(PENDING_USER_INPUT_METADATA_KEY, None)
+    return next_metadata
+
+
+def _build_pending_user_input_continuation_text(
+    pending_user_input: dict[str, Any] | None,
+) -> str | None:
+    normalized = _normalize_pending_user_input(pending_user_input)
+    if normalized is None:
+        return None
+
+    lines = [
+        "The previous agent run paused to request missing information.",
+        "Treat the current user message as the latest reply to that request or as a new instruction that supersedes it.",
+        "Continue the task with the hidden agent history from the previous run.",
+        "",
+        "Pending user input request:",
+        normalized["prompt"],
+    ]
+    choices = normalized.get("choices") or []
+    if choices:
+        lines.append("")
+        lines.append("Suggested choices:")
+        lines.extend(f"- {choice}" for choice in choices)
+    why_needed = str(normalized.get("why_needed", "")).strip()
+    if why_needed:
+        lines.append("")
+        lines.append("Why this was needed:")
+        lines.append(why_needed)
     return "\n".join(lines).strip()
 
 

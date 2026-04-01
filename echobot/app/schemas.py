@@ -130,13 +130,41 @@ class ChatResponse(BaseModel):
 class ChatJobResponse(BaseModel):
     job_id: str
     session_name: str
+    prompt: str
+    role_name: str
     status: str
+    attempt: int = 1
+    retry_of_job_id: str | None = None
+    can_retry: bool = False
     response: str = ""
     response_content: str | list[dict[str, Any]] = ""
     error: str = ""
     steps: int = 0
+    pending_user_input: dict[str, Any] | None = None
     created_at: str
+    started_at: str
+    finished_at: str = ""
     updated_at: str
+
+
+class ChatJobSummaryModel(BaseModel):
+    job_id: str
+    session_name: str
+    prompt: str
+    role_name: str
+    status: str
+    attempt: int = 1
+    retry_of_job_id: str | None = None
+    can_retry: bool = False
+    error: str = ""
+    created_at: str
+    started_at: str
+    finished_at: str = ""
+    updated_at: str
+
+
+class ChatJobsResponse(BaseModel):
+    jobs: list[ChatJobSummaryModel] = Field(default_factory=list)
 
 
 class ChatJobTraceResponse(BaseModel):
@@ -348,6 +376,10 @@ class WebStageConfigModel(BaseModel):
 
 class WebRuntimeConfigModel(BaseModel):
     delegated_ack_enabled: bool = True
+    shell_safety_mode: str = "danger-full-access"
+    file_write_enabled: bool = True
+    cron_mutation_enabled: bool = True
+    web_private_network_enabled: bool = False
 
 
 class WebConfigResponse(BaseModel):
@@ -362,7 +394,11 @@ class WebConfigResponse(BaseModel):
 
 
 class UpdateWebRuntimeConfigRequest(BaseModel):
-    delegated_ack_enabled: bool
+    delegated_ack_enabled: bool | None = None
+    shell_safety_mode: str | None = None
+    file_write_enabled: bool | None = None
+    cron_mutation_enabled: bool | None = None
+    web_private_network_enabled: bool | None = None
 
 
 class ASRTranscriptionResponse(BaseModel):

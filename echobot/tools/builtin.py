@@ -8,9 +8,18 @@ from ..attachments import AttachmentStore
 from ..scheduling.cron import CronService
 from .base import BaseTool, ToolOutput, ToolRegistry
 from .cron import CronTool
-from .filesystem import ListDirectoryTool, ReadTextFileTool, WriteTextFileTool
+from .filesystem import (
+    EditTextFileTool,
+    ListDirectoryTool,
+    ReadTextFileTool,
+    SearchFilesTool,
+    SearchTextInFilesTool,
+    WriteTextFileTool,
+)
+from .git import GitDiffTool, GitStatusTool
 from .memory import MemorySearchTool
 from .media import SendFileToUserTool, SendImageToUserTool, ViewImageTool
+from .planning import RequestUserInputTool, UpdatePlanTool
 from .shell import CommandExecutionTool, _decode_command_output, locale
 from .web import WebRequestTool
 
@@ -41,15 +50,29 @@ def create_basic_tool_registry(
     memory_support: Any | None = None,
     cron_service: CronService | None = None,
     session_name: str = "default",
+    allow_file_writes: bool = True,
     allow_cron_mutations: bool = True,
+    allow_private_network: bool = False,
+    shell_safety_mode: str = "danger-full-access",
 ) -> ToolRegistry:
     tools: list[BaseTool] = [
         CurrentTimeTool(),
         ListDirectoryTool(workspace),
+        SearchFilesTool(workspace),
+        SearchTextInFilesTool(workspace),
         ReadTextFileTool(workspace),
-        WriteTextFileTool(workspace),
-        WebRequestTool(),
-        CommandExecutionTool(workspace),
+        WriteTextFileTool(workspace, writes_enabled=allow_file_writes),
+        EditTextFileTool(workspace, writes_enabled=allow_file_writes),
+        GitStatusTool(workspace),
+        GitDiffTool(workspace),
+        UpdatePlanTool(),
+        RequestUserInputTool(),
+        WebRequestTool(allow_private_network=allow_private_network),
+        CommandExecutionTool(
+            workspace,
+            shell_safety_mode=shell_safety_mode,
+            workspace_write_enabled=allow_file_writes,
+        ),
     ]
     if attachment_store is not None:
         if supports_image_input:
@@ -74,9 +97,16 @@ __all__ = [
     "CommandExecutionTool",
     "CronTool",
     "CurrentTimeTool",
+    "EditTextFileTool",
+    "GitDiffTool",
+    "GitStatusTool",
     "ListDirectoryTool",
     "MemorySearchTool",
     "ReadTextFileTool",
+    "RequestUserInputTool",
+    "SearchFilesTool",
+    "SearchTextInFilesTool",
+    "UpdatePlanTool",
     "WebRequestTool",
     "WriteTextFileTool",
     "_decode_command_output",

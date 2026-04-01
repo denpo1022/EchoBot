@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from echobot.channels.types import ChannelAddress
@@ -30,6 +32,7 @@ from echobot.commands.runtime import (
     parse_runtime_command,
 )
 from echobot.commands.saved_sessions import parse_saved_session_command
+from echobot.runtime.settings import RuntimeControls, RuntimeSettingsStore
 from echobot.runtime.sessions import ChatSession
 
 
@@ -191,11 +194,15 @@ class MinimalCommandCoordinatorStub:
     delegated_ack_enabled = True
 
 
+RUNTIME_CONTROLS = RuntimeControls()
+
+
 class CommandExecutionTests(unittest.IsolatedAsyncioTestCase):
     async def test_dispatch_cli_command_returns_global_help_for_help_alias(self) -> None:
         result = await dispatch_cli_command(
             CliCommandContext(
                 coordinator=MinimalCommandCoordinatorStub(),
+                runtime_controls=RUNTIME_CONTROLS,
                 workspace=Path("."),
                 session_service=object(),
                 session_name="demo",
@@ -214,6 +221,7 @@ class CommandExecutionTests(unittest.IsolatedAsyncioTestCase):
         result = await dispatch_gateway_command(
             GatewayCommandContext(
                 coordinator=MinimalCommandCoordinatorStub(),
+                runtime_controls=RUNTIME_CONTROLS,
                 workspace=Path("."),
                 session_service=object(),
                 route_key="demo-route",
@@ -252,6 +260,7 @@ class CommandExecutionTests(unittest.IsolatedAsyncioTestCase):
 
             response = await execute_runtime_command(
                 coordinator,
+                RuntimeControls(),
                 workspace,
                 RuntimeCommand(
                     action="set",
@@ -278,6 +287,7 @@ class CommandExecutionTests(unittest.IsolatedAsyncioTestCase):
 
             current = await execute_runtime_command(
                 coordinator,
+                RuntimeControls(),
                 workspace,
                 RuntimeCommand(action="get", key="delegated_ack_enabled"),
             )
@@ -288,12 +298,131 @@ class CommandExecutionTests(unittest.IsolatedAsyncioTestCase):
 
             listing = await execute_runtime_command(
                 coordinator,
+                RuntimeControls(),
                 workspace,
                 RuntimeCommand(action="list"),
             )
             self.assertIn("Runtime settings:", listing)
             self.assertIn("delegated_ack_enabled = off", listing)
 
+    async def test_execute_runtime_command_updates_shell_safety_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            coordinator = RuntimeCommandCoordinatorStub()
+            controls = RuntimeControls()
+
+            response = await execute_runtime_command(
+                coordinator,
+                controls,
+                workspace,
+                RuntimeCommand(
+                    action="set",
+                    key="shell_safety_mode",
+                    value="read-only",
+                ),
+            )
+
+            self.assertEqual("read-only", controls.shell_safety_mode)
+            self.assertEqual(
+                "Updated runtime setting: shell_safety_mode = read-only",
+                response,
+            )
+
+            settings_path = workspace / ".echobot" / "runtime_settings.json"
+            payload = json.loads(settings_path.read_text(encoding="utf-8"))
+            self.assertEqual("read-only", payload["shell_safety_mode"])
+
+    async def test_execute_runtime_command_updates_tool_safety_switches(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            coordinator = RuntimeCommandCoordinatorStub()
+            controls = RuntimeControls()
+
+            response = await execute_runtime_command(
+                coordinator,
+                controls,
+                workspace,
+                RuntimeCommand(
+                    action="set",
+                    key="file_write_enabled",
+                    value="off",
+                ),
+            )
+
+            self.assertFalse(controls.file_write_enabled)
+            self.assertEqual(
+                "Updated runtime setting: file_write_enabled = off",
+                response,
+            )
+
+            response = await execute_runtime_command(
+                coordinator,
+                controls,
+                workspace,
+                RuntimeCommand(
+                    action="set",
+                    key="web_private_network_enabled",
+                    value="on",
+                ),
+            )
+
+            self.assertTrue(controls.web_private_network_enabled)
+            self.assertEqual(
+                "Updated runtime setting: web_private_network_enabled = on",
+                response,
+            )
+
+            settings_path = workspace / ".echobot" / "runtime_settings.json"
+            payload = json.loads(settings_path.read_text(encoding="utf-8"))
+            self.assertFalse(payload["file_write_enabled"])
+            self.assertTrue(payload["web_private_network_enabled"])
+
+
+class RuntimeSettingsStoreTests(unittest.TestCase):
+    def test_update_serializes_concurrent_writers_for_same_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = (
+                Path(temp_dir) / ".echobot" / "runtime_settings.json"
+            )
+            store = RuntimeSettingsStore(settings_path)
+            store.update_named_value("delegated_ack_enabled", True)
+
+            first_entered = threading.Event()
+            release_first = threading.Event()
+            second_entered = threading.Event()
+
+            def run_first_update() -> None:
+                def updater(settings) -> None:
+                    first_entered.set()
+                    self.assertTrue(release_first.wait(timeout=1))
+                    settings.set_named_value("delegated_ack_enabled", False)
+
+                store.update(updater)
+
+            def run_second_update() -> None:
+                def updater(settings) -> None:
+                    second_entered.set()
+                    settings.set_named_value("file_write_enabled", False)
+
+                store.update(updater)
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                first_future = executor.submit(run_first_update)
+                self.assertTrue(first_entered.wait(timeout=1))
+
+                second_future = executor.submit(run_second_update)
+                self.assertFalse(second_entered.wait(timeout=0.1))
+
+                release_first.set()
+                first_future.result(timeout=1)
+                second_future.result(timeout=1)
+
+            payload = json.loads(settings_path.read_text(encoding="utf-8"))
+            self.assertFalse(payload["delegated_ack_enabled"])
+            self.assertFalse(payload["file_write_enabled"])
+
+
+class RouteModeCommandExecutionTests(unittest.IsolatedAsyncioTestCase):
     async def test_execute_route_mode_command_updates_session_route_mode(self) -> None:
         coordinator = RouteModeCommandCoordinatorStub(route_mode="auto")
 

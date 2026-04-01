@@ -9,10 +9,12 @@ from typing import Any
 from ..models import (
     LLMMessage,
     LLMTool,
+    MessageContent,
     MessageContentBlock,
     ToolCall,
     message_content_blocks,
     normalize_image_input,
+    normalize_message_content,
 )
 
 
@@ -20,10 +22,26 @@ ToolPayload = str | int | float | bool | None | dict[str, Any] | list[Any]
 
 
 @dataclass(slots=True)
+class ToolTraceEvent:
+    event: str
+    data: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ToolLoopControl:
+    action: str
+    status: str = "completed"
+    response_content: MessageContent = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class ToolExecutionOutput:
     data: ToolPayload
     promoted_image_urls: list[dict[str, str]] = field(default_factory=list)
     outbound_content_blocks: list[MessageContentBlock] = field(default_factory=list)
+    trace_events: list[ToolTraceEvent] = field(default_factory=list)
+    control: ToolLoopControl | None = None
 
 
 ToolOutput = ToolPayload | ToolExecutionOutput
@@ -37,6 +55,8 @@ class ToolResult:
     is_error: bool = False
     promoted_image_urls: list[dict[str, str]] = field(default_factory=list)
     outbound_content_blocks: list[MessageContentBlock] = field(default_factory=list)
+    trace_events: list[ToolTraceEvent] = field(default_factory=list)
+    control: ToolLoopControl | None = None
 
     def to_message(self) -> LLMMessage:
         return LLMMessage(
@@ -115,6 +135,8 @@ class ToolRegistry:
             content=_build_payload(execution_output.data),
             promoted_image_urls=execution_output.promoted_image_urls,
             outbound_content_blocks=execution_output.outbound_content_blocks,
+            trace_events=execution_output.trace_events,
+            control=execution_output.control,
         )
 
     async def execute_tool_calls(
@@ -123,7 +145,10 @@ class ToolRegistry:
     ) -> list[ToolResult]:
         results: list[ToolResult] = []
         for tool_call in tool_calls:
-            results.append(await self.execute(tool_call))
+            result = await self.execute(tool_call)
+            results.append(result)
+            if result.control is not None:
+                break
 
         return results
 
@@ -160,6 +185,8 @@ def _normalize_execution_output(output: ToolOutput) -> ToolExecutionOutput:
             outbound_content_blocks=_normalize_outbound_content_blocks(
                 output.outbound_content_blocks
             ),
+            trace_events=_normalize_trace_events(output.trace_events),
+            control=_normalize_tool_loop_control(output.control),
         )
 
     return ToolExecutionOutput(data=output)
@@ -183,6 +210,41 @@ def _normalize_outbound_content_blocks(
     for block in values:
         normalized_blocks.extend(message_content_blocks([block]))
     return normalized_blocks
+
+
+def _normalize_trace_events(
+    values: list[ToolTraceEvent],
+) -> list[ToolTraceEvent]:
+    normalized_events: list[ToolTraceEvent] = []
+    for value in values:
+        event_name = str(value.event or "").strip()
+        if not event_name:
+            continue
+        normalized_events.append(
+            ToolTraceEvent(
+                event=event_name,
+                data=dict(value.data or {}),
+            )
+        )
+    return normalized_events
+
+
+def _normalize_tool_loop_control(
+    value: ToolLoopControl | None,
+) -> ToolLoopControl | None:
+    if value is None:
+        return None
+
+    action = str(value.action or "").strip()
+    if not action:
+        return None
+
+    return ToolLoopControl(
+        action=action,
+        status=str(value.status or "").strip() or "completed",
+        response_content=normalize_message_content(value.response_content),
+        metadata=dict(value.metadata or {}),
+    )
 
 
 def _build_payload(data: ToolPayload, *, is_error: bool = False) -> str:

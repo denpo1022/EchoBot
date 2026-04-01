@@ -168,6 +168,7 @@ async def _main_async(args: argparse.Namespace) -> None:
     coordinator = context.coordinator
     command_context = CliCommandContext(
         coordinator=coordinator,
+        runtime_controls=context.runtime_controls,
         workspace=context.workspace,
         session_service=session_service,
         session_name=session.name,

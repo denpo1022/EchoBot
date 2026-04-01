@@ -291,12 +291,52 @@
                             </select>
                         </label>
                     </div>
-                    <div class="toggle-row">
-                        <label class="toggle-item">
-                            <input id="delegated-ack-checkbox" type="checkbox" checked>
-                            <span>后台任务开始时先发提示</span>
-                        </label>
-                    </div>
+                    <details id="runtime-panel" class="stage-background-panel runtime-panel" open>
+                        <summary class="stage-background-header">
+                            <div class="stage-background-header-main">
+                                <p class="section-title">Runtime 配置</p>
+                            </div>
+                            <button
+                                id="runtime-reset-button"
+                                class="ghost-button ghost-button-compact"
+                                type="button"
+                            >
+                                恢复默认
+                            </button>
+                        </summary>
+                        <div class="stage-background-panel-body">
+                            <div class="field-grid">
+                                <label class="field field-span-full">
+                                    <span>Shell 安全模式</span>
+                                    <select id="shell-safety-mode-select">
+                                        <option value="danger-full-access">danger-full-access</option>
+                                        <option value="workspace-write">workspace-write</option>
+                                        <option value="read-only">read-only</option>
+                                    </select>
+                                </label>
+                            </div>
+                            <div class="toggle-row">
+                                <label class="toggle-item">
+                                    <input id="delegated-ack-checkbox" type="checkbox" checked>
+                                    <span>后台任务开始时先发提示</span>
+                                </label>
+                                <label class="toggle-item">
+                                    <input id="file-write-enabled-checkbox" type="checkbox" checked>
+                                    <span>允许 Agent 写入工作区文件</span>
+                                </label>
+                            </div>
+                            <div class="toggle-row">
+                                <label class="toggle-item">
+                                    <input id="cron-mutation-enabled-checkbox" type="checkbox" checked>
+                                    <span>允许 Agent 修改 CRON 任务</span>
+                                </label>
+                                <label class="toggle-item">
+                                    <input id="web-private-network-enabled-checkbox" type="checkbox">
+                                    <span>允许 Agent 访问私有网络</span>
+                                </label>
+                            </div>
+                        </div>
+                    </details>
                     <details id="live2d-panel" class="stage-background-panel" open>
                         <summary class="stage-background-header">
                             <div class="stage-background-header-main">

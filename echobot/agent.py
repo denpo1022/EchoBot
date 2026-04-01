@@ -26,6 +26,8 @@ class AgentRunResult:
     steps: int
     compressed_summary: str = ""
     outbound_content_blocks: list[dict[str, Any]] | None = None
+    status: str = "completed"
+    pending_user_input: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.outbound_content_blocks is None:
@@ -33,6 +35,7 @@ class AgentRunResult:
 
 
 TraceCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
+SystemPromptValue = str | Callable[[], str]
 
 
 class AgentCore:
@@ -40,7 +43,7 @@ class AgentCore:
         self,
         provider: LLMProvider,
         *,
-        system_prompt: str | None = None,
+        system_prompt: SystemPromptValue | None = None,
         memory_support: Any | None = None,
     ) -> None:
         self.provider = provider
@@ -260,11 +263,53 @@ class AgentCore:
                     is_error=result.is_error,
                     message=_message_to_trace_dict(tool_message),
                 )
+                for trace_event in result.trace_events:
+                    await _emit_trace(
+                        trace_callback,
+                        trace_event.event,
+                        step=step,
+                        tool_name=result.tool_name,
+                        tool_call_id=result.call_id,
+                        **trace_event.data,
+                    )
                 if result.promoted_image_urls and not result.is_error:
                     promoted_image_urls.extend(result.promoted_image_urls)
                     promoted_tool_names.append(result.tool_name)
                 if result.outbound_content_blocks and not result.is_error:
                     outbound_content_blocks.extend(result.outbound_content_blocks)
+
+            control_result = _first_tool_control_result(tool_results)
+            if control_result is not None and control_result.control is not None:
+                final_response = LLMResponse(
+                    message=LLMMessage(
+                        role="assistant",
+                        content=control_result.control.response_content,
+                    ),
+                    model=response.model,
+                    finish_reason="stop",
+                    usage=response.usage,
+                )
+                persistent_messages.append(final_response.message)
+                new_messages.append(final_response.message)
+                await _emit_trace(
+                    trace_callback,
+                    "assistant_message",
+                    step=step,
+                    message=_message_to_trace_dict(final_response.message),
+                    source="tool_control",
+                    status=control_result.control.status,
+                )
+                await self._remember_turn(new_messages)
+                return AgentRunResult(
+                    response=final_response,
+                    new_messages=new_messages,
+                    history=persistent_messages,
+                    steps=step,
+                    compressed_summary=compressed_summary,
+                    outbound_content_blocks=outbound_content_blocks,
+                    status=control_result.control.status,
+                    pending_user_input=dict(control_result.control.metadata or {}),
+                )
 
             promoted_message = _build_promoted_tool_image_message(
                 promoted_image_urls,
@@ -352,6 +397,8 @@ class AgentCore:
                 steps=result.steps,
                 compressed_summary=result.compressed_summary,
                 outbound_content_blocks=result.outbound_content_blocks,
+                status=result.status,
+                pending_user_input=result.pending_user_input,
             )
 
         result = await self.ask_with_memory(
@@ -373,6 +420,8 @@ class AgentCore:
             history=persisted_skill_messages + result.history,
             steps=1,
             compressed_summary=result.compressed_summary,
+            status=result.status,
+            pending_user_input=result.pending_user_input,
         )
 
     def _build_persistent_messages(
@@ -462,8 +511,9 @@ class AgentCore:
         extra_system_messages: Sequence[str] | None = None,
     ) -> list[str]:
         contents: list[str] = []
-        if self.system_prompt:
-            contents.append(self.system_prompt)
+        system_prompt = self._resolved_system_prompt()
+        if system_prompt:
+            contents.append(system_prompt)
         if extra_system_messages:
             contents.extend(extra_system_messages)
         return contents
@@ -473,6 +523,13 @@ class AgentCore:
         extra_system_messages: Sequence[str] | None = None,
     ) -> str:
         return "\n\n".join(self._system_message_contents(extra_system_messages))
+
+    def _resolved_system_prompt(self) -> str:
+        if self.system_prompt is None:
+            return ""
+
+        prompt = self.system_prompt() if callable(self.system_prompt) else self.system_prompt
+        return str(prompt).strip()
 
 
 async def _emit_trace(
@@ -533,6 +590,13 @@ def _build_promoted_tool_image_message(
         role="user",
         content=build_user_message_content(prompt_text, image_urls=image_urls),
     )
+
+
+def _first_tool_control_result(tool_results):
+    for result in tool_results:
+        if result.control is not None:
+            return result
+    return None
 
 
 def _split_messages_for_transient_context(

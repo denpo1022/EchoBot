@@ -98,6 +98,9 @@ function buildTraceSummaryText(status, eventCount) {
     if (status === "cancelled") {
         return `后台任务已停止，已记录 ${eventCount} 条事件`;
     }
+    if (status === "waiting_for_input") {
+        return `后台任务暂停中，等待你的补充信息，已记录 ${eventCount} 条事件`;
+    }
     if (status === "completed") {
         return `后台任务已完成，共 ${eventCount} 条事件`;
     }
@@ -113,6 +116,9 @@ function buildEmptyStateText(status) {
     }
     if (status === "cancelled") {
         return "任务已停止，暂时没有更多 trace。";
+    }
+    if (status === "waiting_for_input") {
+        return "Agent 正在等待你的补充信息。";
     }
     if (status === "completed") {
         return "任务已完成，但暂时没有可显示的 trace。";
@@ -167,6 +173,9 @@ function buildTraceEventCard(event, index) {
 
 function resolveTraceEventClassName(event) {
     if (event?.event === "turn_completed") {
+        if (event?.status === "waiting_for_input") {
+            return "";
+        }
         return "agent-trace-event-success";
     }
     if (event?.event === "turn_failed" || event?.is_error) {
@@ -193,6 +202,9 @@ function buildTraceEventTitle(event) {
         return "开始处理";
     }
     if (eventName === "turn_completed") {
+        if (event?.status === "waiting_for_input") {
+            return "等待用户回复";
+        }
         return "处理完成";
     }
     if (eventName === "turn_failed") {
@@ -217,6 +229,10 @@ function buildTraceEventTitle(event) {
             String(event?.tool_name || "unknown-tool"),
             traceMessageRawContent(event?.message),
         );
+    }
+    const customTitle = String(event?.title || "").trim();
+    if (customTitle) {
+        return customTitle;
     }
     return eventName || "trace";
 }
@@ -243,6 +259,9 @@ function buildTraceEventSummary(event) {
         return event?.is_error ? "工具执行失败。" : "工具执行完成。";
     }
     if (eventName === "turn_completed") {
+        if (event?.status === "waiting_for_input") {
+            return "后台任务已暂停，等待你的补充信息。";
+        }
         const steps = Number.isFinite(event?.steps) ? event.steps : null;
         if (steps !== null) {
             return `后台任务已完成，共执行 ${steps} 步。`;
@@ -251,6 +270,10 @@ function buildTraceEventSummary(event) {
     }
     if (eventName === "turn_failed") {
         return String(event?.error || "后台任务执行失败。");
+    }
+    const customSummary = String(event?.summary || "").trim();
+    if (customSummary) {
+        return customSummary;
     }
     return "";
 }
@@ -278,6 +301,10 @@ function buildTraceEventDetails(event) {
     }
     if (eventName === "turn_failed") {
         return String(event?.error || "").trim();
+    }
+    const customDetails = String(event?.details || "").trim();
+    if (customDetails) {
+        return customDetails;
     }
     return "";
 }

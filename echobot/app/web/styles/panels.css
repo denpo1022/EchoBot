@@ -760,6 +760,11 @@
     background: rgba(255, 251, 246, 0.9);
 }
 
+.runtime-panel {
+    background:
+        linear-gradient(180deg, rgba(255, 252, 247, 0.96) 0%, rgba(255, 244, 232, 0.9) 100%);
+}
+
 .stage-effects-panel {
     background:
         linear-gradient(180deg, rgba(255, 252, 248, 0.92) 0%, rgba(248, 243, 255, 0.7) 100%);
@@ -797,6 +802,7 @@
     gap: 6px;
 }
 
+.runtime-panel .ghost-button,
 .stage-effects-header .ghost-button {
     margin-left: auto;
 }

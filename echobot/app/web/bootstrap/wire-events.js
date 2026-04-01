@@ -67,6 +67,7 @@ export function wireAppEvents(features) {
     bindOptionalClick(DOM.live2dUploadButton, () => DOM.live2dUploadInput?.click());
     bindOptionalInputChange(DOM.live2dUploadInput, live2d.handleLive2DDirectoryUpload);
     bindOptionalToggle(DOM.live2dPanel, layout.handleLive2DPanelToggle);
+    bindOptionalToggle(DOM.runtimePanel, layout.handleRuntimePanelToggle);
     bindOptionalClick(DOM.live2dDrawerToggle, () => {
         layout.setLive2DDrawerOpen(!panelState.live2dDrawerOpen);
     });
@@ -133,6 +134,17 @@ export function wireAppEvents(features) {
     bindOptionalAsyncChange(DOM.roleSelect, roles.handleRoleSelectionChange);
     bindOptionalAsyncChange(DOM.routeModeSelect, sessions.handleRouteModeChange);
     bindOptionalAsyncChange(DOM.delegatedAckCheckbox, layout.handleDelegatedAckToggle);
+    bindOptionalAsyncChange(DOM.fileWriteEnabledCheckbox, layout.handleFileWriteToggle);
+    bindOptionalAsyncChange(DOM.cronMutationEnabledCheckbox, layout.handleCronMutationToggle);
+    bindOptionalAsyncChange(
+        DOM.webPrivateNetworkEnabledCheckbox,
+        layout.handleWebPrivateNetworkToggle,
+    );
+    bindOptionalAsyncChange(DOM.shellSafetyModeSelect, layout.handleShellSafetyModeChange);
+    bindOptionalClick(DOM.runtimeResetButton, (event) => {
+        layout.stopSummaryButtonToggle(event);
+        layout.handleRuntimeReset();
+    });
 
     bindOptionalClick(DOM.roleSidebarToggle, (event) => {
         layout.stopSummaryButtonToggle(event);
@@ -221,8 +233,8 @@ function bindOptionalChange(element, handler) {
 
 function bindOptionalClick(element, handler) {
     if (element) {
-        element.addEventListener("click", () => {
-            void handler();
+        element.addEventListener("click", (event) => {
+            void handler(event);
         });
     }
 }

@@ -5,7 +5,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..runtime.settings import RuntimeSettingsStore
+from ..runtime.settings import (
+    RUNTIME_SETTING_DEFINITIONS,
+    RuntimeControls,
+    RuntimeSettingsManager,
+    format_runtime_setting_value,
+    parse_text_runtime_setting_value,
+)
 from .parsing import split_action_argument, split_command_parts
 
 if TYPE_CHECKING:
@@ -17,22 +23,6 @@ class RuntimeCommand:
     action: str
     key: str = ""
     value: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class RuntimeSettingDefinition:
-    name: str
-    value_hint: str
-    description: str
-
-
-RUNTIME_SETTING_DEFINITIONS: dict[str, RuntimeSettingDefinition] = {
-    "delegated_ack_enabled": RuntimeSettingDefinition(
-        name="delegated_ack_enabled",
-        value_hint="on|off",
-        description="Show the task-start tip before background work",
-    ),
-}
 
 
 def parse_runtime_command(text: str) -> RuntimeCommand | None:
@@ -85,16 +75,21 @@ def format_runtime_help() -> str:
 
 async def execute_runtime_command(
     coordinator: "ConversationCoordinator",
+    runtime_controls: RuntimeControls,
     workspace: Path,
     command: RuntimeCommand,
 ) -> str:
-    store = RuntimeSettingsStore(workspace / ".echobot" / "runtime_settings.json")
+    manager = RuntimeSettingsManager(
+        workspace,
+        coordinator=coordinator,
+        runtime_controls=runtime_controls,
+    )
 
     if command.action == "help":
         return format_runtime_help()
 
     if command.action == "list":
-        return _format_runtime_settings_list(coordinator)
+        return _format_runtime_settings_list(manager)
 
     if command.action == "get":
         if not command.key:
@@ -103,7 +98,7 @@ async def execute_runtime_command(
             return _format_unknown_runtime_setting(command.key)
         return _format_runtime_setting_line(
             command.key,
-            _read_runtime_setting(coordinator, command.key),
+            manager.get(command.key),
         )
 
     if command.action == "set":
@@ -112,24 +107,22 @@ async def execute_runtime_command(
         if command.key not in RUNTIME_SETTING_DEFINITIONS:
             return _format_unknown_runtime_setting(command.key)
         try:
-            parsed_value = _parse_runtime_setting_value(command.key, command.value)
+            parsed_value = parse_text_runtime_setting_value(command.key, command.value)
         except ValueError as exc:
             return str(exc)
         try:
-            await asyncio.to_thread(
-                store.update_named_value,
+            snapshot = await asyncio.to_thread(
+                manager.apply_named_value,
                 command.key,
                 parsed_value,
             )
         except Exception as exc:
             return f"Failed to save runtime settings: {exc}"
-
-        _apply_runtime_setting(coordinator, command.key, parsed_value)
         return (
             "Updated runtime setting: "
             + _format_runtime_setting_line(
                 command.key,
-                _read_runtime_setting(coordinator, command.key),
+                snapshot[command.key],
             )
         )
 
@@ -137,14 +130,15 @@ async def execute_runtime_command(
 
 
 def _format_runtime_settings_list(
-    coordinator: "ConversationCoordinator",
+    manager: RuntimeSettingsManager,
 ) -> str:
+    snapshot = manager.snapshot()
     lines = ["Runtime settings:"]
     for name in RUNTIME_SETTING_DEFINITIONS:
         lines.append(
             _format_runtime_setting_line(
                 name,
-                _read_runtime_setting(coordinator, name),
+                snapshot[name],
             )
         )
     return "\n".join(lines)
@@ -152,48 +146,9 @@ def _format_runtime_settings_list(
 
 def _format_runtime_setting_line(name: str, value: object) -> str:
     definition = RUNTIME_SETTING_DEFINITIONS[name]
-    return f"{definition.name} = {_format_runtime_setting_value(name, value)}"
-
-
-def _format_runtime_setting_value(name: str, value: object) -> str:
-    if name == "delegated_ack_enabled":
-        return "on" if bool(value) else "off"
-    raise KeyError(name)
+    return f"{definition.name} = {format_runtime_setting_value(name, value)}"
 
 
 def _format_unknown_runtime_setting(name: str) -> str:
     known_names = ", ".join(RUNTIME_SETTING_DEFINITIONS)
     return f"Unknown runtime setting: {name}. Available settings: {known_names}"
-
-
-def _parse_runtime_setting_value(name: str, raw_value: str) -> object:
-    cleaned = str(raw_value or "").strip().lower()
-    if name == "delegated_ack_enabled":
-        if cleaned in {"on", "true", "enable", "enabled"}:
-            return True
-        if cleaned in {"off", "false", "disable", "disabled"}:
-            return False
-        raise ValueError(
-            "Invalid value for delegated_ack_enabled. Use on or off."
-        )
-    raise KeyError(name)
-
-
-def _read_runtime_setting(
-    coordinator: "ConversationCoordinator",
-    name: str,
-) -> object:
-    if name == "delegated_ack_enabled":
-        return coordinator.delegated_ack_enabled
-    raise KeyError(name)
-
-
-def _apply_runtime_setting(
-    coordinator: "ConversationCoordinator",
-    name: str,
-    value: object,
-) -> None:
-    if name == "delegated_ack_enabled":
-        coordinator.set_delegated_ack_enabled(bool(value))
-        return
-    raise KeyError(name)

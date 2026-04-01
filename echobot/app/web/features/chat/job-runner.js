@@ -182,6 +182,8 @@ export function createChatRunner(deps) {
 
                 if (finalJob.status === "cancelled") {
                     setRunStatus("后台任务已停止");
+                } else if (finalJob.status === "waiting_for_input") {
+                    setRunStatus("等待你的补充信息");
                 } else if (finalJob.status === "failed") {
                     setRunStatus("后台任务失败");
                 } else {
@@ -274,6 +276,10 @@ export function createChatRunner(deps) {
             }
             if (payload.status === "failed") {
                 setRunStatus("后台任务已失败");
+                return;
+            }
+            if (payload.status === "waiting_for_input") {
+                setRunStatus("等待你的补充信息");
                 return;
             }
 

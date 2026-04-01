@@ -25,6 +25,7 @@ from ..schemas import (
 )
 from ..services.web_console import Live2DUploadFile
 from ..state import get_app_runtime
+from ...runtime.settings import RuntimeSettingsManager
 
 
 router = APIRouter(tags=["web"])
@@ -44,11 +45,14 @@ async def get_web_config(
     route_mode = await runtime.context.coordinator.current_route_mode(
         current_session.name,
     )
+    runtime_snapshot = await asyncio.to_thread(
+        _runtime_settings_manager(runtime).snapshot,
+    )
     payload = await runtime.web_console_service.build_frontend_config(
         session_name=current_session.name,
         role_name=role_name,
         route_mode=route_mode,
-        delegated_ack_enabled=runtime.context.coordinator.delegated_ack_enabled,
+        runtime_config=runtime_snapshot,
     )
     return WebConfigResponse(**payload)
 
@@ -61,13 +65,37 @@ async def update_web_runtime_config(
     if runtime.context is None:
         raise HTTPException(status_code=503, detail="EchoBot runtime is not ready")
 
-    runtime.context.coordinator.set_delegated_ack_enabled(
-        request.delegated_ack_enabled,
+    updates = {
+        "delegated_ack_enabled": request.delegated_ack_enabled,
+        "shell_safety_mode": request.shell_safety_mode,
+        "file_write_enabled": request.file_write_enabled,
+        "cron_mutation_enabled": request.cron_mutation_enabled,
+        "web_private_network_enabled": request.web_private_network_enabled,
+    }
+
+    try:
+        snapshot = await asyncio.to_thread(
+            _runtime_settings_manager(runtime).apply_updates,
+            updates,
+        )
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return WebRuntimeConfigModel(**snapshot)
+
+
+@router.post("/web/runtime/reset", response_model=WebRuntimeConfigModel)
+async def reset_web_runtime_config(
+    runtime=Depends(get_app_runtime),
+) -> WebRuntimeConfigModel:
+    if runtime.context is None:
+        raise HTTPException(status_code=503, detail="EchoBot runtime is not ready")
+
+    snapshot = await asyncio.to_thread(
+        _runtime_settings_manager(runtime).reset_overrides,
+        runtime.context.default_runtime_config.to_dict(),
     )
-    payload = await runtime.web_console_service.save_runtime_settings(
-        delegated_ack_enabled=request.delegated_ack_enabled,
-    )
-    return WebRuntimeConfigModel(**payload)
+    return WebRuntimeConfigModel(**snapshot)
 
 
 @router.get("/web/live2d/{asset_path:path}")
@@ -352,3 +380,11 @@ async def asr_websocket(websocket: WebSocket) -> None:
                 await websocket.send_json(event)
             except RuntimeError:
                 break
+
+
+def _runtime_settings_manager(runtime) -> RuntimeSettingsManager:
+    return RuntimeSettingsManager(
+        runtime.context.workspace,
+        coordinator=runtime.context.coordinator,
+        runtime_controls=runtime.context.runtime_controls,
+    )

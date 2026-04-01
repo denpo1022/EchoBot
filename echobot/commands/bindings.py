@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, cast
 
 from ..channels.types import ChannelAddress
 from ..orchestration import ConversationCoordinator
+from ..runtime.settings import RuntimeControls
 from ..runtime.session_service import SessionService
 from .dispatcher import BoundTextCommand, CommandResult, dispatch_text_command
 from .help import (
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
 @dataclass(slots=True)
 class CliCommandContext:
     coordinator: ConversationCoordinator
+    runtime_controls: RuntimeControls
     workspace: Path
     session_service: SessionService
     session_name: str
@@ -47,6 +49,7 @@ class CliCommandContext:
 @dataclass(slots=True)
 class GatewayCommandContext:
     coordinator: ConversationCoordinator
+    runtime_controls: RuntimeControls
     workspace: Path
     session_service: GatewaySessionService
     route_key: str
@@ -100,6 +103,7 @@ async def _execute_cli_runtime(
     return CommandResult(
         text=await execute_runtime_command(
             context.coordinator,
+            context.runtime_controls,
             context.workspace,
             command,
         )
@@ -186,6 +190,7 @@ async def _execute_gateway_runtime(
     return CommandResult(
         text=await execute_runtime_command(
             context.coordinator,
+            context.runtime_controls,
             context.workspace,
             command,
         )

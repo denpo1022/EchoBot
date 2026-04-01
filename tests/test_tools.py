@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import shutil
+import subprocess
 import threading
 import tempfile
 import unittest
@@ -488,6 +491,313 @@ class BasicToolRegistryTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(payload["ok"])
             self.assertEqual(0, payload["result"]["return_code"])
             self.assertIn("subdir", payload["result"]["stdout"])
+
+    async def test_command_execution_tool_blocks_write_command_in_read_only_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            registry = create_basic_tool_registry(
+                workspace,
+                shell_safety_mode="read-only",
+            )
+
+            result = await registry.execute(
+                ToolCall(
+                    id="call_shell_blocked",
+                    name="run_shell_command",
+                    arguments=json.dumps(
+                        {
+                            "command": 'Set-Content note.txt "hello"',
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            )
+
+            payload = json.loads(result.content)
+            self.assertFalse(payload["ok"])
+            self.assertIn("shell safety mode", payload["error"])
+
+    async def test_command_execution_tool_blocks_interpreter_bypass_in_read_only_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            registry = create_basic_tool_registry(
+                workspace,
+                shell_safety_mode="read-only",
+            )
+
+            result = await registry.execute(
+                ToolCall(
+                    id="call_shell_python_bypass",
+                    name="run_shell_command",
+                    arguments=json.dumps(
+                        {
+                            "command": (
+                                'python -c "from pathlib import Path; '
+                                "Path('blocked.txt').write_text('x', encoding='utf-8')\""
+                            ),
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            )
+
+            payload = json.loads(result.content)
+            self.assertFalse(payload["ok"])
+            self.assertIn("danger-full-access", payload["error"])
+            self.assertFalse((workspace / "blocked.txt").exists())
+
+    async def test_command_execution_tool_allows_simple_workspace_write_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            registry = create_basic_tool_registry(
+                workspace,
+                shell_safety_mode="workspace-write",
+            )
+            command = 'Set-Content note.txt "hello"' if os.name == "nt" else "touch note.txt"
+
+            result = await registry.execute(
+                ToolCall(
+                    id="call_shell_workspace_write",
+                    name="run_shell_command",
+                    arguments=json.dumps(
+                        {
+                            "command": command,
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            )
+
+            payload = json.loads(result.content)
+            self.assertTrue(payload["ok"])
+            self.assertTrue((workspace / "note.txt").exists())
+
+    async def test_command_execution_tool_respects_disabled_workspace_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            registry = create_basic_tool_registry(
+                workspace,
+                allow_file_writes=False,
+                shell_safety_mode="workspace-write",
+            )
+            command = 'Set-Content note.txt "hello"' if os.name == "nt" else "touch note.txt"
+
+            result = await registry.execute(
+                ToolCall(
+                    id="call_shell_workspace_write_blocked",
+                    name="run_shell_command",
+                    arguments=json.dumps(
+                        {
+                            "command": command,
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            )
+
+            payload = json.loads(result.content)
+            self.assertFalse(payload["ok"])
+            self.assertIn("workspace file writes are disabled", payload["error"])
+            self.assertFalse((workspace / "note.txt").exists())
+
+    async def test_file_write_tools_can_be_disabled_by_runtime_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            source_file = workspace / "demo.txt"
+            source_file.write_text("hello", encoding="utf-8")
+            registry = create_basic_tool_registry(
+                workspace,
+                allow_file_writes=False,
+            )
+
+            write_result = await registry.execute(
+                ToolCall(
+                    id="call_write_blocked",
+                    name="write_text_file",
+                    arguments=json.dumps(
+                        {
+                            "path": "blocked.txt",
+                            "content": "data",
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            )
+            edit_result = await registry.execute(
+                ToolCall(
+                    id="call_edit_blocked",
+                    name="edit_text_file",
+                    arguments=json.dumps(
+                        {
+                            "path": "demo.txt",
+                            "old_text": "hello",
+                            "new_text": "world",
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            )
+
+            write_payload = json.loads(write_result.content)
+            edit_payload = json.loads(edit_result.content)
+
+            self.assertFalse(write_payload["ok"])
+            self.assertIn("已禁用文件写入工具", write_payload["error"])
+            self.assertFalse(edit_payload["ok"])
+            self.assertIn("已禁用文件写入工具", edit_payload["error"])
+
+    async def test_command_execution_tool_blocks_parent_directory_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            registry = create_basic_tool_registry(
+                workspace,
+                shell_safety_mode="workspace-write",
+            )
+
+            result = await registry.execute(
+                ToolCall(
+                    id="call_shell_parent_path",
+                    name="run_shell_command",
+                    arguments=json.dumps(
+                        {
+                            "command": 'Get-Content ..\\secret.txt',
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            )
+
+            payload = json.loads(result.content)
+            self.assertFalse(payload["ok"])
+            self.assertIn("outside the workspace", payload["error"])
+
+    async def test_search_and_edit_tools_cover_common_code_workflows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            source_file = workspace / "src" / "demo.py"
+            source_file.parent.mkdir(parents=True, exist_ok=True)
+            source_file.write_text(
+                "def greet():\n    return 'hello'\n",
+                encoding="utf-8",
+            )
+            registry = create_basic_tool_registry(workspace)
+
+            search_files_result = await registry.execute(
+                ToolCall(
+                    id="call_search_files",
+                    name="search_files",
+                    arguments=json.dumps(
+                        {"pattern": "*.py"},
+                        ensure_ascii=False,
+                    ),
+                )
+            )
+            search_text_result = await registry.execute(
+                ToolCall(
+                    id="call_search_text",
+                    name="search_text_in_files",
+                    arguments=json.dumps(
+                        {"query": "return", "glob": "*.py"},
+                        ensure_ascii=False,
+                    ),
+                )
+            )
+            edit_result = await registry.execute(
+                ToolCall(
+                    id="call_edit",
+                    name="edit_text_file",
+                    arguments=json.dumps(
+                        {
+                            "path": "src/demo.py",
+                            "old_text": "hello",
+                            "new_text": "hi",
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            )
+
+            search_files_payload = json.loads(search_files_result.content)
+            search_text_payload = json.loads(search_text_result.content)
+            edit_payload = json.loads(edit_result.content)
+
+            self.assertTrue(search_files_payload["ok"])
+            self.assertEqual("src/demo.py", search_files_payload["result"]["matches"][0]["path"])
+            self.assertTrue(search_text_payload["ok"])
+            self.assertEqual("src/demo.py", search_text_payload["result"]["matches"][0]["path"])
+            self.assertTrue(edit_payload["ok"])
+            self.assertEqual("hi", source_file.read_text(encoding="utf-8").split("'")[1])
+
+    @unittest.skipUnless(shutil.which("git"), "git is required for git tool tests")
+    async def test_git_tools_report_status_and_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            subprocess.run(
+                ["git", "init"],
+                cwd=workspace,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            tracked_file = workspace / "demo.txt"
+            tracked_file.write_text("before\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "demo.txt"],
+                cwd=workspace,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"],
+                cwd=workspace,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "EchoBot Test"],
+                cwd=workspace,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "init"],
+                cwd=workspace,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            tracked_file.write_text("after\n", encoding="utf-8")
+
+            registry = create_basic_tool_registry(workspace)
+            status_result = await registry.execute(
+                ToolCall(
+                    id="call_git_status",
+                    name="git_status",
+                    arguments="{}",
+                )
+            )
+            diff_result = await registry.execute(
+                ToolCall(
+                    id="call_git_diff",
+                    name="git_diff",
+                    arguments=json.dumps(
+                        {"path": "demo.txt"},
+                        ensure_ascii=False,
+                    ),
+                )
+            )
+
+            status_payload = json.loads(status_result.content)
+            diff_payload = json.loads(diff_result.content)
+
+            self.assertTrue(status_payload["ok"])
+            self.assertIn("demo.txt", status_payload["result"]["text"])
+            self.assertTrue(diff_payload["ok"])
+            self.assertIn("-before", diff_payload["result"]["diff"])
+            self.assertIn("+after", diff_payload["result"]["diff"])
 
     async def test_basic_tool_registry_can_register_memory_search(self) -> None:
         registry = create_basic_tool_registry(

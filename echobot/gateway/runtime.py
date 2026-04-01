@@ -101,6 +101,7 @@ class GatewayRuntime:
         command_result = await dispatch_gateway_command(
             GatewayCommandContext(
                 coordinator=self._context.coordinator,
+                runtime_controls=self._context.runtime_controls,
                 workspace=self._context.workspace,
                 session_service=self._session_service,
                 route_key=route_key,

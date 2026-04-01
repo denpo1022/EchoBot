@@ -14,6 +14,7 @@ from echobot.config import (
 )
 from echobot.images import DEFAULT_IMAGE_BUDGET
 from echobot.runtime.bootstrap import RuntimeOptions, build_runtime_context
+from echobot.runtime.settings import DEFAULT_SHELL_SAFETY_MODE
 
 
 class RuntimeLoggingConfigTests(unittest.TestCase):
@@ -177,6 +178,110 @@ class RuntimeBootstrapConfigTests(unittest.TestCase):
                 )
 
             self.assertFalse(context.coordinator._delegated_ack_enabled)
+
+    def test_build_runtime_context_reads_shell_safety_mode_from_env_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            env_file = workspace / ".env"
+            env_file.write_text(
+                "\n".join(
+                    [
+                        "LLM_API_KEY=test-key",
+                        "LLM_MODEL=test-model",
+                        "LLM_BASE_URL=https://example.com/v1",
+                        "LLM_TIMEOUT=60",
+                        "ECHOBOT_SHELL_SAFETY_MODE=read-only",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {}, clear=True):
+                context = build_runtime_context(
+                    RuntimeOptions(
+                        workspace=workspace,
+                        no_memory=True,
+                        no_tools=True,
+                        no_skills=True,
+                        no_heartbeat=True,
+                    ),
+                    load_session_state=False,
+                )
+
+            self.assertEqual("read-only", context.runtime_controls.shell_safety_mode)
+
+    def test_build_runtime_context_defaults_shell_safety_mode_to_full_access(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            env_file = workspace / ".env"
+            env_file.write_text(
+                "\n".join(
+                    [
+                        "LLM_API_KEY=test-key",
+                        "LLM_MODEL=test-model",
+                        "LLM_BASE_URL=https://example.com/v1",
+                        "LLM_TIMEOUT=60",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {}, clear=True):
+                context = build_runtime_context(
+                    RuntimeOptions(
+                        workspace=workspace,
+                        no_memory=True,
+                        no_tools=True,
+                        no_skills=True,
+                        no_heartbeat=True,
+                    ),
+                    load_session_state=False,
+                )
+
+            self.assertEqual(
+                DEFAULT_SHELL_SAFETY_MODE,
+                context.runtime_controls.shell_safety_mode,
+            )
+
+    def test_build_runtime_context_system_prompt_tracks_runtime_control_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            env_file = workspace / ".env"
+            env_file.write_text(
+                "\n".join(
+                    [
+                        "LLM_API_KEY=test-key",
+                        "LLM_MODEL=test-model",
+                        "LLM_BASE_URL=https://example.com/v1",
+                        "LLM_TIMEOUT=60",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {}, clear=True):
+                context = build_runtime_context(
+                    RuntimeOptions(
+                        workspace=workspace,
+                        no_memory=True,
+                        no_tools=True,
+                        no_skills=True,
+                        no_heartbeat=True,
+                    ),
+                    load_session_state=False,
+                )
+
+            initial_prompt = context.agent._system_prompt_text()
+            context.runtime_controls.set_shell_safety_mode("read-only")
+            context.runtime_controls.set_file_write_enabled(False)
+            updated_prompt = context.agent._system_prompt_text()
+
+            self.assertIn("Current shell safety mode: `danger-full-access`.", initial_prompt)
+            self.assertIn("Current shell safety mode: `read-only`.", updated_prompt)
+            self.assertIn("Workspace file writes are currently disabled.", updated_prompt)
 
     def test_build_runtime_context_reads_image_budget_from_env_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
