@@ -22,6 +22,7 @@ export function createLayoutModule(deps) {
         formatTimestamp: deps.formatTimestamp,
         isSettingsPanelOpen: panels.isSettingsPanelOpen,
         requestJson: deps.requestJson,
+        setRunStatus: deps.setRunStatus,
     });
     heartbeat = createHeartbeatController({
         isSettingsPanelOpen: panels.isSettingsPanelOpen,

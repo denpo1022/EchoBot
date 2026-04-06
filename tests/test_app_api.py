@@ -2202,6 +2202,50 @@ class AppApiTests(unittest.TestCase):
             self.assertEqual("error", jobs_by_id["job_disabled"]["last_status"])
             self.assertEqual("network timeout", jobs_by_id["job_disabled"]["last_error"])
 
+    def test_cron_delete_endpoint_removes_job_and_returns_not_found_afterwards(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            write_test_cron_jobs(workspace)
+            app = create_app(
+                runtime_options=RuntimeOptions(
+                    workspace=workspace,
+                    no_tools=True,
+                    no_skills=True,
+                    no_memory=True,
+                    no_heartbeat=True,
+                ),
+                channel_config_path=workspace / ".echobot" / "channels.json",
+                context_builder=build_test_context,
+            )
+
+            with TestClient(app) as client:
+                deleted = client.delete("/api/cron/jobs/job_enabled")
+                jobs = client.get("/api/cron/jobs?include_disabled=true")
+                missing = client.delete("/api/cron/jobs/job_enabled")
+
+            self.assertEqual(200, deleted.status_code)
+            self.assertEqual(
+                {
+                    "deleted": True,
+                    "job_id": "job_enabled",
+                },
+                deleted.json(),
+            )
+
+            self.assertEqual(200, jobs.status_code)
+            payload = jobs.json()
+            self.assertEqual(1, len(payload["jobs"]))
+            self.assertEqual("job_disabled", payload["jobs"][0]["id"])
+
+            saved = json.loads(
+                (workspace / ".echobot" / "cron" / "jobs.json").read_text(encoding="utf-8"),
+            )
+            self.assertEqual(1, len(saved["jobs"]))
+            self.assertEqual("job_disabled", saved["jobs"][0]["id"])
+
+            self.assertEqual(404, missing.status_code)
+            self.assertEqual("Cron job not found: job_enabled", missing.json()["detail"])
+
     def test_heartbeat_endpoint_returns_content_and_allows_updates(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)

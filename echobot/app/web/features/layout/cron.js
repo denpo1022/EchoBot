@@ -3,7 +3,12 @@ import { panelState, CRON_POLL_INTERVAL_MS } from "../../core/store.js";
 import { writeCronPanelState } from "./panels.js";
 
 export function createCronController(deps) {
-    const { formatTimestamp, isSettingsPanelOpen, requestJson } = deps;
+    const {
+        formatTimestamp,
+        isSettingsPanelOpen,
+        requestJson,
+        setRunStatus = () => {},
+    } = deps;
 
     function handleCronPanelToggle() {
         if (!DOM.cronPanel || !DOM.cronSummaryText) {
@@ -54,20 +59,10 @@ export function createCronController(deps) {
             return;
         }
 
-        panelState.cronLoading = true;
-        if (DOM.cronStatus) {
-            DOM.cronStatus.textContent = "正在加载 CRON 定时任务…";
-        }
-        if (DOM.cronRefreshButton) {
-            DOM.cronRefreshButton.disabled = true;
-        }
-
         try {
-            const [statusPayload, jobsPayload] = await Promise.all([
-                requestJson("/api/cron/status"),
-                requestJson("/api/cron/jobs?include_disabled=true"),
-            ]);
-            renderCronPanel(statusPayload, jobsPayload.jobs || []);
+            setCronPanelLoading(true, "正在加载 CRON 定时任务…");
+            const { statusPayload, jobs } = await loadCronPanelData();
+            renderCronPanel(statusPayload, jobs);
         } catch (error) {
             console.error(error);
             if (DOM.cronSummaryText) {
@@ -77,11 +72,19 @@ export function createCronController(deps) {
                 DOM.cronStatus.textContent = error.message || "CRON 加载失败";
             }
         } finally {
-            panelState.cronLoading = false;
-            if (DOM.cronRefreshButton) {
-                DOM.cronRefreshButton.disabled = false;
-            }
+            setCronPanelLoading(false);
         }
+    }
+
+    async function loadCronPanelData() {
+        const [statusPayload, jobsPayload] = await Promise.all([
+            requestJson("/api/cron/status"),
+            requestJson("/api/cron/jobs?include_disabled=true"),
+        ]);
+        return {
+            statusPayload: statusPayload,
+            jobs: jobsPayload.jobs || [],
+        };
     }
 
     function renderCronPanel(statusPayload, jobs) {
@@ -171,6 +174,21 @@ export function createCronController(deps) {
         container.appendChild(meta);
         container.appendChild(times);
 
+        const actions = document.createElement("div");
+        actions.className = "cron-job-actions";
+
+        const cancelButton = document.createElement("button");
+        cancelButton.type = "button";
+        cancelButton.className = "ghost-button ghost-button-compact ghost-button-danger";
+        cancelButton.textContent = "取消";
+        cancelButton.disabled = panelState.cronLoading || !job.id;
+        cancelButton.addEventListener("click", () => {
+            void handleCancelCronJob(job);
+        });
+
+        actions.appendChild(cancelButton);
+        container.appendChild(actions);
+
         if (job.last_error) {
             const error = document.createElement("div");
             error.className = "cron-job-error";
@@ -179,6 +197,65 @@ export function createCronController(deps) {
         }
 
         return container;
+    }
+
+    async function handleCancelCronJob(job) {
+        const jobId = String(job?.id || "").trim();
+        if (!jobId || panelState.cronLoading) {
+            return;
+        }
+
+        const jobName = String(job?.name || "未命名任务");
+        if (!window.confirm(`确定取消 CRON 任务“${jobName}”吗？`)) {
+            return;
+        }
+
+        try {
+            setCronPanelLoading(true, `正在取消 CRON 任务：${jobName}…`);
+            await requestJson(`/api/cron/jobs/${encodeURIComponent(jobId)}`, {
+                method: "DELETE",
+            });
+
+            const { statusPayload, jobs } = await loadCronPanelData();
+            renderCronPanel(statusPayload, jobs);
+
+            const statusText = `已取消 CRON 任务：${jobName}`;
+            if (DOM.cronStatus) {
+                DOM.cronStatus.textContent = statusText;
+            }
+            setRunStatus(statusText);
+        } catch (error) {
+            console.error(error);
+            const message = error.message || "取消 CRON 任务失败";
+            if (DOM.cronStatus) {
+                DOM.cronStatus.textContent = message;
+            }
+            setRunStatus(message);
+        } finally {
+            setCronPanelLoading(false);
+        }
+    }
+
+    function setCronPanelLoading(isLoading, statusText = "") {
+        panelState.cronLoading = isLoading;
+        if (DOM.cronStatus && statusText) {
+            DOM.cronStatus.textContent = statusText;
+        }
+        if (DOM.cronRefreshButton) {
+            DOM.cronRefreshButton.disabled = isLoading;
+        }
+        toggleCronJobButtons(isLoading);
+    }
+
+    function toggleCronJobButtons(disabled) {
+        if (!DOM.cronJobs) {
+            return;
+        }
+
+        const buttons = DOM.cronJobs.querySelectorAll("button");
+        buttons.forEach((button) => {
+            button.disabled = disabled;
+        });
     }
 
     function buildCronBadge(text, kind) {

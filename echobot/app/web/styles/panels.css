@@ -1138,6 +1138,12 @@
     font-size: 0.86rem;
 }
 
+.cron-job-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 12px;
+}
+
 .cron-badge {
     display: inline-flex;
     align-items: center;

@@ -3,7 +3,12 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ...scheduling.cron import summarize_job
-from ..schemas import CronJobModel, CronJobsResponse, CronStatusResponse
+from ..schemas import (
+    CronDeleteResponse,
+    CronJobModel,
+    CronJobsResponse,
+    CronStatusResponse,
+)
 from ..state import get_app_runtime
 
 
@@ -42,6 +47,20 @@ async def list_cron_jobs(
             for job in jobs
         ]
     )
+
+
+@router.delete("/cron/jobs/{job_id}", response_model=CronDeleteResponse)
+async def delete_cron_job(
+    job_id: str,
+    runtime=Depends(get_app_runtime),
+) -> CronDeleteResponse:
+    if runtime.context is None:
+        raise HTTPException(status_code=503, detail="EchoBot runtime is not ready")
+
+    removed = await runtime.context.cron_service.remove_job(job_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"Cron job not found: {job_id}")
+    return CronDeleteResponse(deleted=True, job_id=job_id)
 
 
 def _optional_text(value: object) -> str | None:

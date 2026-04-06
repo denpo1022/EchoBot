@@ -198,6 +198,11 @@ class CronJobsResponse(BaseModel):
     jobs: list[CronJobModel] = Field(default_factory=list)
 
 
+class CronDeleteResponse(BaseModel):
+    deleted: bool = True
+    job_id: str
+
+
 class HeartbeatConfigResponse(BaseModel):
     enabled: bool = False
     interval_seconds: int = 0
