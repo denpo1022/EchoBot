@@ -99,7 +99,9 @@ class Live2DModelCatalog:
         resolved_path = self._resolve_under_root(root, relative_path)
         if resolved_path is None:
             return None
-        if not resolved_path.is_file() or not resolved_path.name.endswith(".model3.json"):
+        if not resolved_path.is_file() or not resolved_path.name.endswith(
+            ".model3.json"
+        ):
             return None
 
         return self._candidate_from_path(source, root, resolved_path)
@@ -124,10 +126,8 @@ class Live2DModelCatalog:
         return f"{candidate.source}:{candidate.model_relative_path.as_posix()}"
 
     def asset_url_for(self, candidate: Live2DModelCandidate, relative_path: str) -> str:
-        return (
-            f"/api/web/live2d/{candidate.source}/"
-            f"{quote(str(relative_path or '').replace('\\', '/'), safe='/')}"
-        )
+        normalized = str(relative_path or "").replace("\\", "/")
+        return f"/api/web/live2d/{candidate.source}/{quote(normalized, safe='/')}"
 
     def directory_name_for(self, candidate: Live2DModelCandidate) -> str:
         runtime_relative_path = candidate.runtime_relative_path
@@ -174,7 +174,10 @@ class Live2DModelCatalog:
     ) -> Live2DModelCandidate | None:
         resolved_root = root.resolve()
         resolved_model_path = model_path.resolve()
-        if resolved_model_path != resolved_root and resolved_root not in resolved_model_path.parents:
+        if (
+            resolved_model_path != resolved_root
+            and resolved_root not in resolved_model_path.parents
+        ):
             return None
         if not resolved_model_path.name.endswith(".model3.json"):
             return None
@@ -206,7 +209,10 @@ class Live2DModelCatalog:
     def _resolve_under_root(root: Path, relative_path: Path) -> Path | None:
         resolved_root = root.resolve()
         resolved_path = (resolved_root / relative_path).resolve()
-        if resolved_path != resolved_root and resolved_root not in resolved_path.parents:
+        if (
+            resolved_path != resolved_root
+            and resolved_root not in resolved_path.parents
+        ):
             return None
         return resolved_path
 
